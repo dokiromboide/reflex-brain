@@ -34,33 +34,6 @@ def daemon(
 
 
 @app.command()
-def migrate(
-    graph_dir: str = typer.Option("brain", "--graph-dir", "-g", help="GraphRAG brain directory"),
-    output: str = typer.Option("continual.db", "--output", "-o", help="Output SQLite database"),
-    confidence: float = typer.Option(0.6, "--confidence", "-c", help="Base confidence for migrated lessons"),
-):
-    """Migrate GraphRAG brain to Continual Brain."""
-    console.print(f"[green]Migrating GraphRAG brain from {graph_dir} to {output}...[/green]")
-    
-    from continual_brain.core.migration import migrate_graphrag
-    from continual_brain.core.store import SQLiteStore
-    
-    store = SQLiteStore(output)
-    asyncio.run(store.initialize())
-    
-    stats = migrate_graphrag(graph_dir, output, confidence)
-    
-    table = Table(title="Migration Results")
-    table.add_column("Metric", style="cyan")
-    table.add_column("Count", style="green")
-    
-    for key, value in stats.items():
-        table.add_row(key.replace("_", " ").title(), str(value))
-    
-    console.print(table)
-
-
-@app.command()
 def query(
     query_text: str = typer.Argument(..., help="Search query"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="Number of results"),
