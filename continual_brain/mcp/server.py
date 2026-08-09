@@ -184,6 +184,20 @@ async def list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="reflex_research",
+            description="Automated web research: search, extract, synthesize and store knowledge on a topic",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Research topic"},
+                    "max_sources": {"type": "integer", "default": 10, "description": "Maximum sources to process"},
+                    "create_lessons": {"type": "boolean", "default": True, "description": "Create lessons from research"},
+                    "create_memories": {"type": "boolean", "default": True, "description": "Create episodic memories"},
+                },
+                "required": ["topic"],
+            },
+        ),
     ]
 
 
@@ -192,6 +206,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     try:
         if name == "reflex_query":
             return await _handle_query(arguments)
+        if name == "reflex_research":
+            return await _handle_research(arguments)
         if name == "reflex_propose_lesson":
             return await _handle_propose_lesson(arguments)
         if name == "reflex_apply_refinement":
@@ -224,6 +240,29 @@ async def _handle_query(args: dict) -> list[TextContent]:
     )
     formatted = querier.format_results(results)
     return [TextContent(type="text", text=formatted)]
+
+
+async def _handle_research(args: dict) -> list[TextContent]:
+    """Handle automated web research."""
+    from continual_brain.core.web_researcher import research_topic
+    from continual_brain.core.store import SQLiteStore
+    
+    store = _get_store()
+    topic = args["topic"]
+    max_sources = args.get("max_sources", 10)
+    create_lessons = args.get("create_lessons", True)
+    create_memories = args.get("create_memories", True)
+    
+    # Run research
+    result = await research_topic(
+        store=_get_store(),
+        topic=topic,
+        max_sources=max_sources,
+        create_lessons=create_lessons,
+        create_memories=create_memories
+    )
+    
+    return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
 
 async def _handle_propose_lesson(args: dict) -> list[TextContent]:

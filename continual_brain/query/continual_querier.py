@@ -177,8 +177,9 @@ class ContinualQuerier:
             if not entity:
                 continue
 
-            # Confidence filter
-            if entity.confidence < min_confidence:
+            # Confidence filter (for Memory, use importance as confidence)
+            entity_confidence = entity.confidence if entity_type != "memory" else entity.importance
+            if entity_confidence < min_confidence:
                 continue
 
             # Status filter
@@ -188,13 +189,14 @@ class ContinualQuerier:
                     continue
 
             # Combined score
-            combined = vector_score * (0.5 + entity.confidence)
+            entity_confidence = entity.confidence if entity_type != "memory" else entity.importance
+            combined = vector_score * (0.5 + entity_confidence)
 
             results.append({
                 "type": entity_type,
                 "entity": entity,
                 "vector_score": vector_score,
-                "confidence": entity.confidence,
+                "confidence": entity_confidence,
                 "combined_score": combined,
             })
 

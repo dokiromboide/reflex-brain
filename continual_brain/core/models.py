@@ -161,6 +161,7 @@ class Memory:
     last_accessed: str | None = None
     access_count: int = 0
     cluster_id: str | None = None
+    tags: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
     def to_dict(self) -> dict:
@@ -174,6 +175,7 @@ class Memory:
             "last_accessed": self.last_accessed,
             "access_count": self.access_count,
             "cluster_id": self.cluster_id,
+            "tags": self.tags,
             "created_at": self.created_at,
         }
 
@@ -189,6 +191,7 @@ class Memory:
             last_accessed=data.get("last_accessed"),
             access_count=data.get("access_count", 0),
             cluster_id=data.get("cluster_id"),
+            tags=data.get("tags", []),
             created_at=data.get("created_at", datetime.utcnow().isoformat() + "Z"),
         )
 

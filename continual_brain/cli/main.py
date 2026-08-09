@@ -32,6 +32,44 @@ def daemon(
 
 
 @app.command()
+def research(
+    topic: str = typer.Argument(..., help="Research topic"),
+    max_sources: int = typer.Option(10, "--max-sources", "-s", help="Maximum sources to process"),
+    create_lessons: bool = typer.Option(True, "--create-lessons/--no-lessons", help="Create lessons from research"),
+    create_memories: bool = typer.Option(True, "--create-memories/--no-memories", help="Create episodic memories"),
+    db_path: str = typer.Option("continual.db", "--db", help="Database path"),
+):
+    """Automated web research: search, extract, synthesize and store knowledge."""
+    console.print(f"[green]Researching: [bold]{topic}[/bold][/green]")
+    
+    store = SQLiteStore(db_path)
+    asyncio.run(store.initialize())
+    
+    from continual_brain.core.web_researcher import research_topic
+    
+    result = asyncio.run(research_topic(
+        store=store,
+        topic=topic,
+        max_sources=max_sources,
+        create_lessons=create_lessons,
+        create_memories=create_memories
+    ))
+    
+    console.print(f"[green]Research complete![/green]")
+    console.print(f"  Sources found: {result.get('sources_found', 0)}")
+    console.print(f"  Sources extracted: {result.get('sources_extracted', 0)}")
+    console.print(f"  Lessons created: {result.get('lessons_created', 0)}")
+    console.print(f"  Memories created: {result.get('memories_created', 0)}")
+    
+    if result.get('source_urls'):
+        console.print("\n[dim]Sources:[/dim]")
+        for url in result.get('source_urls', [])[:5]:
+            console.print(f"  - {url}")
+        if len(result.get('source_urls', [])) > 5:
+            console.print(f"  ... and {len(result['source_urls']) - 5} more")
+
+
+@app.command()
 def query(
     query_text: str = typer.Argument(..., help="Search query"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="Number of results"),
