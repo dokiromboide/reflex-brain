@@ -121,16 +121,6 @@ reflex-brain daemon --poll-interval 3 --batch-size 50
 reflex-brain daemon --daemonize
 ```
 
-## Migration from GraphRAG
-
-If you have an existing Hermes Brain graph:
-
-```bash
-reflex-brain migrate --graph-dir ~/.hermes/brain --output continual.db
-```
-
-Converts clusters + labeled nodes → lessons v1 (confidence=0.6).
-
 ## Configuration
 
 | Env Var | Default | Description |
@@ -172,7 +162,6 @@ reflex-brain/
 ├── tests/
 │   ├── unit/           # Unit tests
 │   └── integration/    # Integration tests
-├── scripts/            # Migration, verification
 └── pyproject.toml
 ```
 
