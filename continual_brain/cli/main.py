@@ -2,18 +2,16 @@
 CLI Entry Points - reflex-brain command line interface.
 """
 from __future__ import annotations
-import os
+from pathlib import Path
+
 import asyncio
 import typer
-from typing import Optional
-from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 
 from continual_brain.core.store import SQLiteStore
-from continual_brain.core.refinement import RefinementEngine
-from continual_brain.query.hybrid_querier import HybridQuerier
 from continual_brain.daemon.processor import run_daemon
+from continual_brain.query.hybrid_querier import HybridQuerier
 
 app = typer.Typer(help="Reflex Brain - Continual learning brain for AI agents")
 console = Console()
@@ -37,7 +35,7 @@ def daemon(
 def query(
     query_text: str = typer.Argument(..., help="Search query"),
     top_k: int = typer.Option(5, "--top-k", "-k", help="Number of results"),
-    source_types: Optional[str] = typer.Option(None, "--source-types", "-s", help="Comma-separated source types"),
+    source_types: str | None = typer.Option(None, "--source-types", "-s", help="Comma-separated source types"),
     expand_depth: int = typer.Option(1, "--expand-depth", "-e", help="Graph expansion depth"),
     min_confidence: float = typer.Option(0.0, "--min-confidence", "-c", help="Minimum confidence"),
     db_path: str = typer.Option("continual.db", "--db", help="Database path"),
@@ -47,8 +45,6 @@ def query(
     
     store = SQLiteStore(db_path)
     asyncio.run(store.initialize())
-    
-    from continual_brain.query.hybrid_querier import HybridQuerier
     
     querier = HybridQuerier(
         store=store,
@@ -76,8 +72,8 @@ def query(
 
 @app.command()
 def list_lessons(
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by status"),
-    cluster_id: Optional[str] = typer.Option(None, "--cluster", help="Filter by cluster"),
+    status: str | None = typer.Option(None, "--status", help="Filter by status"),
+    cluster_id: str | None = typer.Option(None, "--cluster", help="Filter by cluster"),
     limit: int = typer.Option(20, "--limit", "-l", help="Max results"),
     db_path: str = typer.Option("continual.db", "--db", help="Database path"),
 ):
@@ -113,7 +109,7 @@ def list_lessons(
 
 @app.command()
 def list_skills(
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by status"),
+    status: str | None = typer.Option(None, "--status", help="Filter by status"),
     limit: int = typer.Option(20, "--limit", "-l", help="Max results"),
     db_path: str = typer.Option("continual.db", "--db", help="Database path"),
 ):
@@ -155,7 +151,7 @@ def rebuild_index(
     store = SQLiteStore(db_path)
     asyncio.run(store.initialize())
     
-    from continual_brain.query.continual_querier import ContinualQuerier, ContinualFAISSManager
+    from continual_brain.query.continual_querier import ContinualFAISSManager, ContinualQuerier
     
     faiss_mgr = ContinualFAISSManager()
     querier = ContinualQuerier(store, faiss_mgr)
@@ -176,8 +172,7 @@ def verify(
     asyncio.run(store.initialize())
     
     # Test store operations
-    from continual_brain.core.models import Lesson, Skill, Memory, LessonStatus, SkillStatus
-    from continual_brain.query.hybrid_querier import HybridQuerier
+    from continual_brain.core.models import Lesson, LessonStatus, Memory, Skill, SkillStatus
     
     async def run_tests():
         # Test 1: Create and fetch lesson

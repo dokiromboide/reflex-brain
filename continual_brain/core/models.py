@@ -3,12 +3,11 @@ Core data models for Reflex Brain.
 SQLAlchemy models with dataclasses for type safety.
 """
 from __future__ import annotations
+
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
-import json
-import uuid
 
 
 class LessonStatus(str, Enum):
@@ -56,8 +55,8 @@ class Lesson:
     evidence: list[dict] = field(default_factory=list)  # [{"source": "...", "quote": "...", "weight": 0.9}]
     confidence: float = 0.5
     status: LessonStatus = LessonStatus.PROPOSED
-    supersedes_id: Optional[str] = None
-    cluster_id: Optional[str] = None
+    supersedes_id: str | None = None
+    cluster_id: str | None = None
     tags: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
@@ -79,7 +78,7 @@ class Lesson:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Lesson":
+    def from_dict(cls, data: dict) -> Lesson:
         lesson = cls(
             id=data["id"],
             version=data["version"],
@@ -132,7 +131,7 @@ class Skill:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Skill":
+    def from_dict(cls, data: dict) -> Skill:
         return cls(
             id=data["id"],
             version=data["version"],
@@ -159,9 +158,9 @@ class Memory:
     context: dict = field(default_factory=dict)  # {"session": "...", "goal": "...", "tools": [...]}
     importance: float = 0.5
     decay_rate: float = 0.01  # per day
-    last_accessed: Optional[str] = None
+    last_accessed: str | None = None
     access_count: int = 0
-    cluster_id: Optional[str] = None
+    cluster_id: str | None = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
     def to_dict(self) -> dict:
@@ -179,7 +178,7 @@ class Memory:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Memory":
+    def from_dict(cls, data: dict) -> Memory:
         return cls(
             id=data["id"],
             type=MemoryType(data.get("type", "observation")),
@@ -206,9 +205,9 @@ class Refinement:
     diff: dict = field(default_factory=dict)  # {field: {old: x, new: y}}
     confidence_delta: float = 0.0
     status: RefinementStatus = RefinementStatus.PENDING
-    applied_at: Optional[str] = None
-    rolled_back_at: Optional[str] = None
-    snapshot_id: Optional[str] = None
+    applied_at: str | None = None
+    rolled_back_at: str | None = None
+    snapshot_id: str | None = None
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
     def to_dict(self) -> dict:
@@ -229,7 +228,7 @@ class Refinement:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Refinement":
+    def from_dict(cls, data: dict) -> Refinement:
         return cls(
             id=data["id"],
             target_type=data["target_type"],
@@ -266,7 +265,7 @@ class Snapshot:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Snapshot":
+    def from_dict(cls, data: dict) -> Snapshot:
         return cls(
             id=data["id"],
             label=data["label"],

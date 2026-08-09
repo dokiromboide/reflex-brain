@@ -1,16 +1,24 @@
 """
 Unit tests for SQLiteStore.
 """
-import pytest
-import asyncio
-import tempfile
 import os
+import tempfile
 
-from continual_brain.core.store import SQLiteStore
+import pytest
+
 from continual_brain.core.models import (
-    Lesson, Skill, Memory, Refinement, Snapshot,
-    LessonStatus, SkillStatus, MemoryType, RefinementAction, RefinementStatus
+    Lesson,
+    LessonStatus,
+    Memory,
+    MemoryType,
+    Refinement,
+    RefinementAction,
+    RefinementStatus,
+    Skill,
+    SkillStatus,
+    Snapshot,
 )
+from continual_brain.core.store import SQLiteStore
 
 
 @pytest.fixture
@@ -18,12 +26,12 @@ async def store():
     """Create a temporary store for testing."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
-    
+
     store = SQLiteStore(db_path)
     await store.initialize()
-    
+
     yield store
-    
+
     await store.close()
     os.unlink(db_path)
 
@@ -41,10 +49,10 @@ class TestSQLiteStore:
             cluster_id="test_cluster",
             tags=["test", "lesson"],
         )
-        
+
         # Create
         await store.upsert_lesson(lesson)
-        
+
         # Read
         fetched = await store.get_lesson("test_lesson_1")
         assert fetched is not None
@@ -53,24 +61,24 @@ class TestSQLiteStore:
         assert fetched.status == LessonStatus.ACCEPTED
         assert fetched.cluster_id == "test_cluster"
         assert "test" in fetched.tags
-        
+
         # Update
         lesson.confidence = 0.9
         lesson.version = 2
         await store.upsert_lesson(lesson)
-        
+
         fetched = await store.get_lesson("test_lesson_1")
         assert fetched.confidence == 0.9
         assert fetched.version == 2
-        
+
         # List
         lessons = await store.list_lessons(limit=10)
         assert len(lessons) == 1
-        
+
         # Delete
         deleted = await store.delete_lesson("test_lesson_1")
         assert deleted
-        
+
         fetched = await store.get_lesson("test_lesson_1")
         assert fetched is None
 
@@ -87,9 +95,9 @@ class TestSQLiteStore:
             confidence=0.7,
             status=SkillStatus.TESTED,
         )
-        
+
         await store.upsert_skill(skill)
-        
+
         fetched = await store.get_skill("test_skill_1")
         assert fetched is not None
         assert fetched.name == "test_skill"
@@ -97,7 +105,7 @@ class TestSQLiteStore:
         assert fetched.interface["args"][0]["name"] == "x"
         assert "requests" in fetched.dependencies
         assert len(fetched.test_cases) == 1
-        
+
         skills = await store.list_skills(limit=10)
         assert len(skills) == 1
 
@@ -111,16 +119,16 @@ class TestSQLiteStore:
             type=MemoryType.DECISION,
             cluster_id="test_cluster",
         )
-        
+
         await store.upsert_memory(memory)
-        
+
         fetched = await store.get_memory("test_mem_1")
         assert fetched is not None
         assert fetched.content == "Test memory content"
         assert fetched.importance == 0.8
         assert fetched.type == MemoryType.DECISION
         assert fetched.context["session"] == "sess_1"
-        
+
         # Update access
         await store.update_memory_access("test_mem_1")
         fetched = await store.get_memory("test_mem_1")
@@ -140,15 +148,15 @@ class TestSQLiteStore:
             confidence_delta=0.3,
             status=RefinementStatus.APPLIED,
         )
-        
+
         await store.upsert_refinement(ref)
-        
+
         fetched = await store.get_refinement("test_ref_1")
         assert fetched is not None
         assert fetched.target_type == "lesson"
         assert fetched.action == RefinementAction.UPDATE
         assert fetched.confidence_delta == 0.3
-        
+
         refinements = await store.list_refinements(target_type="lesson", limit=10)
         assert len(refinements) == 1
 
@@ -160,14 +168,14 @@ class TestSQLiteStore:
             state={"lessons": [], "skills": []},
             trigger="manual",
         )
-        
+
         await store.create_snapshot(snap)
-        
+
         fetched = await store.get_snapshot("test_snap_1")
         assert fetched is not None
         assert fetched.label == "test snapshot"
         assert fetched.trigger == "manual"
-        
+
         snapshots = await store.list_snapshots(limit=10)
         assert len(snapshots) == 1
 
@@ -175,6 +183,7 @@ class TestSQLiteStore:
     async def test_wal_mode(self, store):
         """Verify WAL mode is enabled."""
         async with store.session() as session:
-            result = await session.exec_driver_sql("PRAGMA journal_mode;")
+            from sqlalchemy import text
+            result = await session.execute(text("PRAGMA journal_mode;"))
             mode = result.fetchone()[0]
             assert mode == "wal"

@@ -3,15 +3,22 @@ Refinement Engine - Evidence-based knowledge evolution.
 Core logic for proposing, validating, and applying refinements.
 """
 from __future__ import annotations
+
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Optional, List, Dict
 from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 from continual_brain.core.models import (
-    Lesson, Skill, Memory, Refinement, Snapshot,
-    LessonStatus, SkillStatus, RefinementAction, RefinementStatus
+    Lesson,
+    LessonStatus,
+    Refinement,
+    RefinementAction,
+    RefinementStatus,
+    Skill,
+    SkillStatus,
+    Snapshot,
 )
 from continual_brain.core.store import SQLiteStore
 from continual_brain.query.hybrid_querier import HybridQuerier
@@ -24,9 +31,9 @@ class RefinementProposal:
     target_type: str  # "lesson" | "skill" | "memory"
     target_id: str
     target_version: int
-    diff: Dict[str, Dict[str, Any]]  # {field: {old: x, new: y}}
+    diff: dict[str, dict[str, Any]]  # {field: {old: x, new: y}}
     justification: str
-    evidence: List[Dict[str, Any]]
+    evidence: list[dict[str, Any]]
     evidence_weight: float
     confidence_delta: float
 
@@ -61,21 +68,21 @@ class EvidenceExtractor:
     def __init__(self, store: SQLiteStore):
         self.store = store
 
-    def extract_from_session(self, session_messages: List[Dict]) -> List[Dict]:
+    def extract_from_session(self, session_messages: list[dict]) -> list[dict]:
         """Extract evidence patterns from a list of messages."""
         evidence = []
-        
+
         for msg in session_messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
             msg_id = msg.get("id", "")
-            
+
             if role not in ("user", "assistant") or not content:
                 continue
-            
+
             # Score content length
             length_score = min(len(content) / 1000, 1.0)
-            
+
             # Detect patterns
             for pattern_type, keywords in self.LEARNING_PATTERNS.items():
                 for kw in keywords:
@@ -89,17 +96,17 @@ class EvidenceExtractor:
                             "role": role,
                         })
                         break  # One match per pattern type per message
-        
+
         return evidence
 
-    def cluster_evidence(self, evidence: List[Dict]) -> Dict[str, List[Dict]]:
+    def cluster_evidence(self, evidence: list[dict]) -> dict[str, list[dict]]:
         """Group evidence by inferred topic/cluster."""
         clusters = defaultdict(list)
-        
+
         for ev in evidence:
             # Simple clustering by keywords in quote
             quote = ev.get("quote", "").lower()
-            
+
             # Topic keywords (extendable)
             topic_map = {
                 "dian": ["dian", "factura", "iva", "facturación", "compliance"],
@@ -110,17 +117,17 @@ class EvidenceExtractor:
                 "graphrag": ["graphrag", "brain", "faiss", "embedding", "cluster"],
                 "marketing": ["marketing", "seo", "contenido", "redes", "social"],
             }
-            
+
             matched = False
             for topic, keywords in topic_map.items():
                 if any(kw in quote for kw in keywords):
                     clusters[topic].append(ev)
                     matched = True
                     break
-            
+
             if not matched:
                 clusters["general"].append(ev)
-        
+
         return dict(clusters)
 
 
@@ -129,7 +136,7 @@ class RefinementEngine:
     Evidence-based refinement engine.
     Equivalent to prime-agent's `/refine` but for continual memory.
     """
-    
+
     def __init__(
         self,
         store: SQLiteStore,
@@ -145,7 +152,7 @@ class RefinementEngine:
         self.min_confidence_for_production = min_confidence_for_production
         self.auto_apply_threshold = auto_apply_threshold
 
-    async def analyze_session(self, session_id: str, session_messages: List[Dict]) -> List[RefinementProposal]:
+    async def analyze_session(self, session_id: str, session_messages: list[dict]) -> list[RefinementProposal]:
         """
         Analyze a completed session and propose refinements.
         Returns list of proposals ready for review/application.
@@ -154,50 +161,50 @@ class RefinementEngine:
         evidence = self.evidence_extractor.extract_from_session(session_messages)
         if not evidence:
             return []
-        
+
         # 2. Cluster evidence by topic
         clustered = self.evidence_extractor.cluster_evidence(evidence)
-        
+
         # 3. For each cluster, propose refinements
         proposals = []
         for topic, topic_evidence in clustered.items():
             topic_proposals = await self._propose_for_topic(topic, topic_evidence, session_id)
             proposals.extend(topic_proposals)
-        
+
         return proposals
 
     async def _propose_for_topic(
         self,
         topic: str,
-        evidence: List[Dict],
+        evidence: list[dict],
         session_id: str
-    ) -> List[RefinementProposal]:
+    ) -> list[RefinementProposal]:
         """Generate proposals for a specific topic cluster."""
         proposals = []
         total_weight = sum(e["weight"] for e in evidence)
-        
+
         if total_weight < self.min_evidence_weight:
             return proposals
-        
+
         # Search existing lessons for this topic
         existing_lessons = await self.store.list_lessons(
             cluster_id=topic,
             status=LessonStatus.ACCEPTED,
             limit=5
         )
-        
+
         # Also search skills
         existing_skills = await self.store.list_skills(
             status=SkillStatus.PRODUCTION,
             limit=5
         )
-        
+
         # Filter skills by lesson_ids matching topic
         relevant_skills = [
             s for s in existing_skills
             if any(topic in lid for lid in s.lesson_ids)
         ]
-        
+
         # Propose lesson updates/creates
         if existing_lessons:
             for lesson in existing_lessons:
@@ -208,33 +215,33 @@ class RefinementEngine:
             proposal = self._propose_lesson_create(topic, evidence, total_weight, session_id)
             if proposal:
                 proposals.append(proposal)
-        
+
         # Propose skill creates from strong patterns
         skill_proposals = await self._propose_skills_from_evidence(topic, evidence, session_id)
         proposals.extend(skill_proposals)
-        
+
         return proposals
 
     def _propose_lesson_update(
         self,
         lesson: Lesson,
-        evidence: List[Dict],
+        evidence: list[dict],
         total_weight: float,
         session_id: str
-    ) -> Optional[RefinementProposal]:
+    ) -> RefinementProposal | None:
         """Propose an update to an existing lesson."""
         # Synthesize new content (in real impl, use LLM)
         new_content = self._synthesize_lesson_content(lesson.content, evidence)
         new_evidence = lesson.evidence + evidence
         new_confidence = min(1.0, lesson.confidence + 0.1 * len(evidence))
-        
+
         diff = {
             "content": {"old": lesson.content, "new": new_content},
             "confidence": {"old": lesson.confidence, "new": new_confidence},
             "evidence": {"old": lesson.evidence, "new": new_evidence},
             "updated_at": {"old": lesson.updated_at, "new": datetime.utcnow().isoformat() + "Z"},
         }
-        
+
         return RefinementProposal(
             action=RefinementAction.UPDATE,
             target_type="lesson",
@@ -250,23 +257,23 @@ class RefinementEngine:
     def _propose_lesson_create(
         self,
         topic: str,
-        evidence: List[Dict],
+        evidence: list[dict],
         total_weight: float,
         session_id: str
-    ) -> Optional[RefinementProposal]:
+    ) -> RefinementProposal | None:
         """Propose a new lesson from evidence cluster."""
         # Generate title from topic + evidence
         title = self._generate_lesson_title(topic, evidence)
         content = self._synthesize_lesson_content("", evidence)
-        
+
         lesson_id = f"lesson_{uuid.uuid4().hex[:12]}"
-        
+
         diff = {
             "content": {"old": None, "new": content},
             "confidence": {"old": 0.0, "new": 0.6},
             "evidence": {"old": [], "new": evidence},
         }
-        
+
         return RefinementProposal(
             action=RefinementAction.CREATE,
             target_type="lesson",
@@ -282,28 +289,28 @@ class RefinementEngine:
     async def _propose_skills_from_evidence(
         self,
         topic: str,
-        evidence: List[Dict],
+        evidence: list[dict],
         session_id: str
-    ) -> List[RefinementProposal]:
+    ) -> list[RefinementProposal]:
         """Propose executable skills from tool usage patterns."""
         proposals = []
-        
+
         # Look for tool usage patterns in evidence
         tool_patterns = [e for e in evidence if e.get("type") == "tool_discovery"]
         if len(tool_patterns) < 2:
             return proposals
-        
+
         # Check if we already have a skill for this
         existing_skills = await self.store.list_skills(status=SkillStatus.PRODUCTION, limit=20)
-        
+
         # Simple heuristic: if multiple tool discoveries, propose skill
         skill_id = f"skill_{uuid.uuid4().hex[:12]}"
-        
+
         diff = {
             "code": {"old": None, "new": "# TODO: Generate from tool patterns"},
             "interface": {"old": None, "new": {"args": [], "returns": {}}},
         }
-        
+
         proposals.append(RefinementProposal(
             action=RefinementAction.CREATE,
             target_type="skill",
@@ -315,23 +322,23 @@ class RefinementEngine:
             evidence_weight=sum(e["weight"] for e in tool_patterns),
             confidence_delta=0.3,
         ))
-        
+
         return proposals
 
-    def _synthesize_lesson_content(self, existing: str, evidence: List[Dict]) -> str:
+    def _synthesize_lesson_content(self, existing: str, evidence: list[dict]) -> str:
         """Synthesize lesson content from existing + new evidence."""
         # In production, this would use an LLM
         # For now, append evidence summary
         if not existing:
             existing = ""
-        
+
         summary = "\n\n---\n### Nueva evidencia (auto-generado)\n"
         for i, ev in enumerate(evidence, 1):
             summary += f"{i}. [{ev['type']}] {ev['quote'][:200]}...\n"
-        
+
         return existing + summary
 
-    def _generate_lesson_title(self, topic: str, evidence: List[Dict]) -> str:
+    def _generate_lesson_title(self, topic: str, evidence: list[dict]) -> str:
         """Generate a lesson title from topic and evidence."""
         topic_titles = {
             "dian": "DIAN Facturación Electrónica",
@@ -352,7 +359,7 @@ class RefinementEngine:
         proposal: RefinementProposal,
         auto_apply: bool = False,
         proposed_by: str = "agent"
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, str | None]:
         """
         Apply a refinement proposal.
         Returns (success, refinement_id).
@@ -360,10 +367,10 @@ class RefinementEngine:
         # Check threshold
         if not auto_apply and proposal.evidence_weight < self.auto_apply_threshold:
             return False, None
-        
+
         # Create snapshot before applying
         snapshot = await self._create_pre_refinement_snapshot(proposal.target_id, proposal.target_type)
-        
+
         # Create refinement record
         refinement = Refinement(
             id=f"ref_{uuid.uuid4().hex[:12]}",
@@ -378,19 +385,18 @@ class RefinementEngine:
             applied_at=datetime.utcnow().isoformat() + "Z",
             snapshot_id=snapshot.id if snapshot else None,
         )
-        
+
         # Apply the diff based on target type
         success = await self._apply_diff(proposal)
-        
+
         if success:
             await self.store.upsert_refinement(refinement)
             if snapshot:
                 await self.store.create_snapshot(snapshot)
             return True, refinement.id
-        else:
-            refinement.status = RefinementStatus.REJECTED
-            await self.store.upsert_refinement(refinement)
-            return False, None
+        refinement.status = RefinementStatus.REJECTED
+        await self.store.upsert_refinement(refinement)
+        return False, None
 
     async def _apply_diff(self, proposal: RefinementProposal) -> bool:
         """Apply the diff to the target entity."""
@@ -416,7 +422,7 @@ class RefinementEngine:
                     lesson.status = LessonStatus.ACCEPTED
                     await self.store.upsert_lesson(lesson)
                     return True
-            
+
             elif proposal.target_type == "skill":
                 skill = await self.store.get_skill(proposal.target_id)
                 if not skill and proposal.action == RefinementAction.CREATE:
@@ -434,20 +440,20 @@ class RefinementEngine:
                     skill.status = SkillStatus.TESTED
                     await self.store.upsert_skill(skill)
                     return True
-            
+
             return False
         except Exception:
             return False
 
     async def _create_pre_refinement_snapshot(
-        self, 
-        target_id: str, 
+        self,
+        target_id: str,
         target_type: str
-    ) -> Optional[Snapshot]:
+    ) -> Snapshot | None:
         """Create a snapshot of relevant state before refinement."""
         # Get current state of target + related
         state = {"lessons": [], "skills": [], "memories": []}
-        
+
         if target_type == "lesson":
             lesson = await self.store.get_lesson(target_id)
             if lesson:
@@ -456,7 +462,7 @@ class RefinementEngine:
             skill = await self.store.get_skill(target_id)
             if skill:
                 state["skills"].append(skill.to_dict())
-        
+
         snapshot = Snapshot(
             id=f"snap_{uuid.uuid4().hex[:12]}",
             label=f"pre-refine-{target_type}-{target_id[:8]}",
@@ -470,23 +476,31 @@ class RefinementEngine:
         refinement = await self.store.get_refinement(refinement_id)
         if not refinement or not refinement.snapshot_id:
             return False
-        
+
         snapshot = await self.store.get_snapshot(refinement.snapshot_id)
         if not snapshot:
             return False
-        
+
         # Restore state from snapshot
         for lesson_data in snapshot.state.get("lessons", []):
             lesson = Lesson.from_dict(lesson_data)
             await self.store.upsert_lesson(lesson)
-        
+
         for skill_data in snapshot.state.get("skills", []):
             skill = Skill.from_dict(skill_data)
             await self.store.upsert_skill(skill)
-        
+
+        # For CREATE actions, the target didn't exist before, so delete it
+        if refinement.action == RefinementAction.CREATE:
+            if refinement.target_type == "lesson":
+                await self.store.delete_lesson(refinement.target_id)
+            elif refinement.target_type == "skill":
+                # Add delete_skill method if needed
+                pass
+
         # Update refinement status
         refinement.status = RefinementStatus.ROLLED_BACK
         refinement.rolled_back_at = datetime.utcnow().isoformat() + "Z"
         await self.store.upsert_refinement(refinement)
-        
+
         return True

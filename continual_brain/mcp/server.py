@@ -3,22 +3,23 @@ MCP Server - Thin wrapper exposing Reflex Brain tools over MCP protocol.
 Pattern 1 from hermes-mcp-extensions skill.
 """
 from __future__ import annotations
-import os
-import json
+
 import asyncio
-from typing import Any, Dict, List, Optional
-from dataclasses import asdict
+import json
+import os
+from typing import Any
 
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
-from continual_brain.core.store import SQLiteStore
-from continual_brain.core.refinement import RefinementEngine, RefinementProposal
-from continual_brain.query.hybrid_querier import HybridQuerier, HybridQueryResult
 from continual_brain.core.models import (
-    Lesson, Skill, Memory, Refinement, Snapshot,
-    LessonStatus, SkillStatus, MemoryType, RefinementAction, RefinementStatus
+    LessonStatus,
+    SkillStatus,
+    Snapshot,
 )
+from continual_brain.core.refinement import RefinementEngine
+from continual_brain.core.store import SQLiteStore
+from continual_brain.query.hybrid_querier import HybridQuerier
 
 # Initialize core components
 DB_PATH = os.getenv("REFLEX_DB_PATH", "continual.db")
@@ -46,7 +47,7 @@ server = Server("reflex-brain")
 
 
 @server.list_tools()
-async def list_tools() -> List[Tool]:
+async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="reflex_query",
@@ -159,33 +160,32 @@ async def list_tools() -> List[Tool]:
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     try:
         if name == "reflex_query":
             return await _handle_query(arguments)
-        elif name == "reflex_propose_lesson":
+        if name == "reflex_propose_lesson":
             return await _handle_propose_lesson(arguments)
-        elif name == "reflex_apply_refinement":
+        if name == "reflex_apply_refinement":
             return await _handle_apply_refinement(arguments)
-        elif name == "reflex_rollback":
+        if name == "reflex_rollback":
             return await _handle_rollback(arguments)
-        elif name == "reflex_snapshot":
+        if name == "reflex_snapshot":
             return await _handle_snapshot(arguments)
-        elif name == "reflex_get_lesson":
+        if name == "reflex_get_lesson":
             return await _handle_get_lesson(arguments)
-        elif name == "reflex_get_skill":
+        if name == "reflex_get_skill":
             return await _handle_get_skill(arguments)
-        elif name == "reflex_list_lessons":
+        if name == "reflex_list_lessons":
             return await _handle_list_lessons(arguments)
-        elif name == "reflex_list_skills":
+        if name == "reflex_list_skills":
             return await _handle_list_skills(arguments)
-        else:
-            return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+        return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
     except Exception as e:
         return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
 
 
-async def _handle_query(args: Dict) -> List[TextContent]:
+async def _handle_query(args: dict) -> list[TextContent]:
     results = await querier.query(
         query_text=args["query"],
         top_k=args.get("top_k", 5),
@@ -197,22 +197,22 @@ async def _handle_query(args: Dict) -> List[TextContent]:
     return [TextContent(type="text", text=formatted)]
 
 
-async def _handle_propose_lesson(args: Dict) -> List[TextContent]:
+async def _handle_propose_lesson(args: dict) -> list[TextContent]:
     # If session_messages not provided, would need to fetch from session store
     # For now, return proposal structure
     session_messages = args.get("session_messages", [])
-    
+
     if not session_messages:
         return [TextContent(type="text", text=json.dumps({
             "error": "session_messages required for proposal",
             "hint": "Provide session messages or implement session store lookup"
         }))]
-    
+
     proposals = await refinement_engine.analyze_session(args.get("session_id", "manual"), session_messages)
-    
+
     if not proposals:
         return [TextContent(type="text", text=json.dumps({"message": "No proposals generated from session"}))]
-    
+
     # Return first proposal
     proposal = proposals[0]
     return [TextContent(type="text", text=json.dumps({
@@ -228,7 +228,7 @@ async def _handle_propose_lesson(args: Dict) -> List[TextContent]:
     }))]
 
 
-async def _handle_apply_refinement(args: Dict) -> List[TextContent]:
+async def _handle_apply_refinement(args: dict) -> list[TextContent]:
     # This would need the proposal object - in practice, store proposals
     return [TextContent(type="text", text=json.dumps({
         "error": "Need to store proposals first. Use reflex_propose_lesson then apply from stored proposal.",
@@ -236,21 +236,19 @@ async def _handle_apply_refinement(args: Dict) -> List[TextContent]:
     }))]
 
 
-async def _handle_rollback(args: Dict) -> List[TextContent]:
+async def _handle_rollback(args: dict) -> list[TextContent]:
     success = await refinement_engine.rollback(args["refinement_id"])
     return [TextContent(type="text", text=json.dumps({"success": success}))]
 
 
-async def _handle_snapshot(args: Dict) -> List[TextContent]:
+async def _handle_snapshot(args: dict) -> list[TextContent]:
     # Get current state
     lessons = await store.list_lessons(limit=1000)
     skills = await store.list_skills(limit=1000)
     memories = await store.list_memories(limit=1000)
-    
-    from continual_brain.core.models import Snapshot
+
     import uuid
-    from datetime import datetime
-    
+
     snapshot = Snapshot(
         id=f"snap_{uuid.uuid4().hex[:12]}",
         label=args["label"],
@@ -261,26 +259,26 @@ async def _handle_snapshot(args: Dict) -> List[TextContent]:
         },
         trigger="manual",
     )
-    
+
     await store.create_snapshot(snapshot)
     return [TextContent(type="text", text=json.dumps({"success": True, "snapshot_id": snapshot.id}))]
 
 
-async def _handle_get_lesson(args: Dict) -> List[TextContent]:
+async def _handle_get_lesson(args: dict) -> list[TextContent]:
     lesson = await store.get_lesson(args["lesson_id"])
     if lesson:
         return [TextContent(type="text", text=json.dumps(lesson.to_dict(), ensure_ascii=False))]
     return [TextContent(type="text", text=json.dumps({"error": "Lesson not found"}))]
 
 
-async def _handle_get_skill(args: Dict) -> List[TextContent]:
+async def _handle_get_skill(args: dict) -> list[TextContent]:
     skill = await store.get_skill(args["skill_id"])
     if skill:
         return [TextContent(type="text", text=json.dumps(skill.to_dict(), ensure_ascii=False))]
     return [TextContent(type="text", text=json.dumps({"error": "Skill not found"}))]
 
 
-async def _handle_list_lessons(args: Dict) -> List[TextContent]:
+async def _handle_list_lessons(args: dict) -> list[TextContent]:
     status = None
     if args.get("status"):
         status = LessonStatus(args["status"])
@@ -288,7 +286,7 @@ async def _handle_list_lessons(args: Dict) -> List[TextContent]:
     return [TextContent(type="text", text=json.dumps([l.to_dict() for l in lessons], ensure_ascii=False))]
 
 
-async def _handle_list_skills(args: Dict) -> List[TextContent]:
+async def _handle_list_skills(args: dict) -> list[TextContent]:
     status = None
     if args.get("status"):
         status = SkillStatus(args["status"])
@@ -301,7 +299,7 @@ async def main():
     await store.initialize()
     # Rebuild continual index on startup
     await querier.continual_querier.rebuild_index()
-    
+
     # Run server over stdio
     from mcp.server.stdio import stdio_server
     async with stdio_server() as (read_stream, write_stream):

@@ -46,10 +46,8 @@ web = [
     "firecrawl>=1.0",
 ]
 
-[project.entry-points]
-console_scripts = [
-    "reflex-brain = continual_brain.cli.main:app",
-]
+[project.scripts]
+reflex-brain = "continual_brain.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["continual_brain"]

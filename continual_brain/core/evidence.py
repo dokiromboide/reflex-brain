@@ -2,9 +2,10 @@
 Evidence extraction and pattern matching utilities.
 """
 from __future__ import annotations
+
 import re
-from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -19,7 +20,7 @@ class ExtractedEntity:
 
 class EntityExtractor:
     """Extracts entities using spaCy NER + custom regex patterns."""
-    
+
     # Custom patterns for tech/business entities
     CUSTOM_PATTERNS = [
         (r'\b(?:DIAN|IVA|RUT|NIT|factura\s+electr[oó]nica)\b', 'TAX_CONCEPT', 0.9),
@@ -35,10 +36,10 @@ class EntityExtractor:
         (r'\b\d+\.\d+\.\d+(?:-[a-zA-Z0-9]+)?\b', 'VERSION', 0.8),
         (r'\b(?:\d{1,3}\.){3}\d{1,3}\b', 'IP', 0.9),
     ]
-    
+
     def __init__(self):
         self._nlp = None
-    
+
     @property
     def nlp(self):
         if self._nlp is None:
@@ -50,11 +51,11 @@ class EntityExtractor:
                 self._nlp = spacy.blank("en")
                 # Add basic NER if available
         return self._nlp
-    
-    def extract(self, text: str) -> List[ExtractedEntity]:
+
+    def extract(self, text: str) -> list[ExtractedEntity]:
         """Extract entities from text using spaCy + custom patterns."""
         entities = []
-        
+
         # spaCy NER
         doc = self.nlp(text)
         for ent in doc.ents:
@@ -65,7 +66,7 @@ class EntityExtractor:
                 start=ent.start_char,
                 end=ent.end_char,
             ))
-        
+
         # Custom regex patterns
         for pattern, label, conf in self.CUSTOM_PATTERNS:
             for match in re.finditer(pattern, text, re.IGNORECASE):
@@ -76,19 +77,19 @@ class EntityExtractor:
                     start=match.start(),
                     end=match.end(),
                 ))
-        
+
         # Deduplicate overlapping entities (keep highest confidence)
         entities = self._deduplicate(entities)
         return entities
-    
-    def _deduplicate(self, entities: List[ExtractedEntity]) -> List[ExtractedEntity]:
+
+    def _deduplicate(self, entities: list[ExtractedEntity]) -> list[ExtractedEntity]:
         """Remove overlapping entities, keeping highest confidence."""
         if not entities:
             return []
-        
+
         # Sort by start position, then by confidence descending
         entities.sort(key=lambda e: (e.start, -e.confidence))
-        
+
         result = [entities[0]]
         for ent in entities[1:]:
             last = result[-1]
@@ -99,13 +100,13 @@ class EntityExtractor:
                     result[-1] = ent
             else:
                 result.append(ent)
-        
+
         return result
 
 
 class PatternMatcher:
     """Matches behavioral patterns in conversation streams."""
-    
+
     # Pattern definitions: (name, keywords, min_occurrences)
     PATTERNS = {
         "decision_making": (["decidí", "elegí", "opté", "concluí", "decided", "chose", "concluded"], 1),
@@ -116,7 +117,7 @@ class PatternMatcher:
         "learning_moment": (["aprendí", "entendí", "ahora sé", "learned", "understood", "now I know"], 1),
         "workflow_optimization": (["más rápido", "optimiz", "automatiz", "faster", "optimize", "automat"], 1),
     }
-    
+
     def __init__(self):
         # Compile regex for each pattern
         self.compiled = {}
@@ -124,11 +125,11 @@ class PatternMatcher:
             # Create regex that matches any keyword
             kw_pattern = '|'.join(re.escape(kw) for kw in keywords)
             self.compiled[name] = (re.compile(kw_pattern, re.IGNORECASE), min_occ)
-    
-    def match(self, text: str) -> Dict[str, List[Dict]]:
+
+    def match(self, text: str) -> dict[str, list[dict]]:
         """Find all pattern matches in text."""
         matches = {}
-        
+
         for name, (pattern, min_occ) in self.compiled.items():
             occurrences = []
             for match in pattern.finditer(text):
@@ -137,37 +138,37 @@ class PatternMatcher:
                     "position": match.start(),
                     "context": text[max(0, match.start()-50):match.end()+50],
                 })
-            
+
             if len(occurrences) >= min_occ:
                 matches[name] = occurrences
-        
+
         return matches
-    
-    def score_conversation(self, messages: List[Dict]) -> Dict[str, float]:
+
+    def score_conversation(self, messages: list[dict]) -> dict[str, float]:
         """Score a conversation for learning potential."""
-        scores = {name: 0.0 for name in self.PATTERNS}
-        
+        scores = dict.fromkeys(self.PATTERNS, 0.0)
+
         for msg in messages:
             content = msg.get("content", "")
             role = msg.get("role", "")
-            
+
             if role not in ("user", "assistant") or not content:
                 continue
-            
+
             matches = self.match(content)
             for name, occs in matches.items():
                 # Weight by message role and length
                 weight = 1.0 if role == "user" else 0.7
                 weight *= min(len(content) / 500, 1.0)
                 scores[name] += len(occs) * weight
-        
+
         return scores
 
 
-def extract_preferences(text: str) -> List[Dict[str, Any]]:
+def extract_preferences(text: str) -> list[dict[str, Any]]:
     """Extract user preferences from text."""
     prefs = []
-    
+
     # Preference patterns
     patterns = [
         (r'prefiero\s+(.+?)(?:\.|$|,)', 'preference'),
@@ -181,7 +182,7 @@ def extract_preferences(text: str) -> List[Dict[str, Any]]:
         (r'I hate\s+(.+?)(?:\.|$|,)', 'hate'),
         (r'I love\s+(.+?)(?:\.|$|,)', 'love'),
     ]
-    
+
     for pattern, pref_type in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             prefs.append({
@@ -190,14 +191,14 @@ def extract_preferences(text: str) -> List[Dict[str, Any]]:
                 "source_text": match.group(0),
                 "confidence": 0.8,
             })
-    
+
     return prefs
 
 
-def extract_tool_usage(text: str) -> List[Dict[str, Any]]:
+def extract_tool_usage(text: str) -> list[dict[str, Any]]:
     """Extract tool usage patterns from text."""
     tools = []
-    
+
     # Tool mention patterns
     patterns = [
         (r'(?:us[ée]|use|used)\s+(?:la\s+)?(?:herramienta\s+)?(\w+(?:[-_]\w+)*)', 'tool_used'),
@@ -205,7 +206,7 @@ def extract_tool_usage(text: str) -> List[Dict[str, Any]]:
         (r'(?:no\s+)?(?:funciona|works?)\s+(?:con|with)\s+(\w+(?:[-_]\w+)*)', 'tool_issue'),
         (r'(?:mejor|better)\s+(?:forma|way)\s+(?:es|is)?\s+(\w+(?:[-_]\w+)*)', 'better_tool'),
     ]
-    
+
     for pattern, usage_type in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
             tools.append({
@@ -214,5 +215,5 @@ def extract_tool_usage(text: str) -> List[Dict[str, Any]]:
                 "context": match.group(0),
                 "confidence": 0.7,
             })
-    
+
     return tools

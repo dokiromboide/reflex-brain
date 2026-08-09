@@ -2,22 +2,27 @@
 SQLite store for Reflex Brain - async, thread-safe, WAL mode.
 """
 from __future__ import annotations
+
 import json
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Optional, List, Dict
-from dataclasses import asdict
 
-from sqlalchemy import (
-    Column, String, Integer, Float, Text, DateTime, Enum as SQLEnum,
-    select, func, delete, update
-)
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import Column, Float, Integer, String, Text, delete, select, update
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
 from continual_brain.core.models import (
-    Lesson, Skill, Memory, Refinement, Snapshot,
-    LessonStatus, SkillStatus, MemoryType, RefinementAction, RefinementStatus
+    Lesson,
+    LessonStatus,
+    Memory,
+    MemoryType,
+    Refinement,
+    RefinementAction,
+    RefinementStatus,
+    Skill,
+    SkillStatus,
+    Snapshot,
 )
 
 Base = declarative_base()
@@ -31,7 +36,7 @@ class LessonORM(Base):
     content = Column(Text, nullable=False)
     evidence = Column(Text, nullable=False)  # JSON
     confidence = Column(Float, default=0.5)
-    status = Column(SQLEnum(LessonStatus), default=LessonStatus.PL)
+    status = Column(SQLEnum(LessonStatus), default=LessonStatus.PROPOSED)
     supersedes_id = Column(String, nullable=True)
     cluster_id = Column(String, nullable=True)
     tags = Column(Text, nullable=False)  # JSON
@@ -103,7 +108,7 @@ class SQLiteStore:
         self.db_path = db_path
         # Ensure directory exists
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        
+
         # Async engine with WAL mode
         self.engine = create_async_engine(
             f"sqlite+aiosqlite:///{db_path}",
@@ -140,7 +145,7 @@ class SQLiteStore:
 
     # ============ Lessons ============
 
-    async def get_lesson(self, lesson_id: str) -> Optional[Lesson]:
+    async def get_lesson(self, lesson_id: str) -> Lesson | None:
         async with self.session() as session:
             result = await session.execute(
                 select(LessonORM).where(LessonORM.id == lesson_id)
@@ -149,12 +154,12 @@ class SQLiteStore:
             return self._lesson_orm_to_model(orm) if orm else None
 
     async def list_lessons(
-        self, 
-        status: Optional[LessonStatus] = None,
-        cluster_id: Optional[str] = None,
+        self,
+        status: LessonStatus | None = None,
+        cluster_id: str | None = None,
         limit: int = 100,
         offset: int = 0
-    ) -> List[Lesson]:
+    ) -> list[Lesson]:
         async with self.session() as session:
             query = select(LessonORM).order_by(LessonORM.updated_at.desc())
             if status:
@@ -172,7 +177,7 @@ class SQLiteStore:
                 select(LessonORM).where(LessonORM.id == lesson.id)
             )
             orm = existing.scalar_one_or_none()
-            
+
             if orm:
                 # Update
                 orm.version = lesson.version
@@ -202,7 +207,7 @@ class SQLiteStore:
                     updated_at=lesson.updated_at,
                 )
                 session.add(orm)
-            
+
             await session.flush()
             return lesson
 
@@ -215,7 +220,7 @@ class SQLiteStore:
 
     # ============ Skills ============
 
-    async def get_skill(self, skill_id: str) -> Optional[Skill]:
+    async def get_skill(self, skill_id: str) -> Skill | None:
         async with self.session() as session:
             result = await session.execute(
                 select(SkillORM).where(SkillORM.id == skill_id)
@@ -225,10 +230,10 @@ class SQLiteStore:
 
     async def list_skills(
         self,
-        status: Optional[SkillStatus] = None,
+        status: SkillStatus | None = None,
         limit: int = 100,
         offset: int = 0
-    ) -> List[Skill]:
+    ) -> list[Skill]:
         async with self.session() as session:
             query = select(SkillORM).order_by(SkillORM.updated_at.desc())
             if status:
@@ -243,7 +248,7 @@ class SQLiteStore:
                 select(SkillORM).where(SkillORM.id == skill.id)
             )
             orm = existing.scalar_one_or_none()
-            
+
             if orm:
                 orm.version = skill.version
                 orm.name = skill.name
@@ -273,13 +278,13 @@ class SQLiteStore:
                     updated_at=skill.updated_at,
                 )
                 session.add(orm)
-            
+
             await session.flush()
             return skill
 
     # ============ Memories ============
 
-    async def get_memory(self, memory_id: str) -> Optional[Memory]:
+    async def get_memory(self, memory_id: str) -> Memory | None:
         async with self.session() as session:
             result = await session.execute(
                 select(MemoryORM).where(MemoryORM.id == memory_id)
@@ -289,12 +294,12 @@ class SQLiteStore:
 
     async def list_memories(
         self,
-        type: Optional[MemoryType] = None,
-        cluster_id: Optional[str] = None,
+        type: MemoryType | None = None,
+        cluster_id: str | None = None,
         min_importance: float = 0.0,
         limit: int = 100,
         offset: int = 0
-    ) -> List[Memory]:
+    ) -> list[Memory]:
         async with self.session() as session:
             query = select(MemoryORM).order_by(MemoryORM.importance.desc())
             if type:
@@ -313,7 +318,7 @@ class SQLiteStore:
                 select(MemoryORM).where(MemoryORM.id == memory.id)
             )
             orm = existing.scalar_one_or_none()
-            
+
             if orm:
                 orm.type = memory.type
                 orm.content = memory.content
@@ -337,7 +342,7 @@ class SQLiteStore:
                     created_at=memory.created_at,
                 )
                 session.add(orm)
-            
+
             await session.flush()
             return memory
 
@@ -356,7 +361,7 @@ class SQLiteStore:
 
     # ============ Refinements ============
 
-    async def get_refinement(self, refinement_id: str) -> Optional[Refinement]:
+    async def get_refinement(self, refinement_id: str) -> Refinement | None:
         async with self.session() as session:
             result = await session.execute(
                 select(RefinementORM).where(RefinementORM.id == refinement_id)
@@ -366,11 +371,11 @@ class SQLiteStore:
 
     async def list_refinements(
         self,
-        target_type: Optional[str] = None,
-        target_id: Optional[str] = None,
-        status: Optional[RefinementStatus] = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        status: RefinementStatus | None = None,
         limit: int = 100
-    ) -> List[Refinement]:
+    ) -> list[Refinement]:
         async with self.session() as session:
             query = select(RefinementORM).order_by(RefinementORM.created_at.desc())
             if target_type:
@@ -389,7 +394,7 @@ class SQLiteStore:
                 select(RefinementORM).where(RefinementORM.id == refinement.id)
             )
             orm = existing.scalar_one_or_none()
-            
+
             if orm:
                 orm.target_type = refinement.target_type
                 orm.target_id = refinement.target_id
@@ -419,13 +424,13 @@ class SQLiteStore:
                     created_at=refinement.created_at,
                 )
                 session.add(orm)
-            
+
             await session.flush()
             return refinement
 
     # ============ Snapshots ============
 
-    async def get_snapshot(self, snapshot_id: str) -> Optional[Snapshot]:
+    async def get_snapshot(self, snapshot_id: str) -> Snapshot | None:
         async with self.session() as session:
             result = await session.execute(
                 select(SnapshotORM).where(SnapshotORM.id == snapshot_id)
@@ -433,7 +438,7 @@ class SQLiteStore:
             orm = result.scalar_one_or_none()
             return self._snapshot_orm_to_model(orm) if orm else None
 
-    async def list_snapshots(self, limit: int = 50) -> List[Snapshot]:
+    async def list_snapshots(self, limit: int = 50) -> list[Snapshot]:
         async with self.session() as session:
             query = select(SnapshotORM).order_by(SnapshotORM.created_at.desc()).limit(limit)
             result = await session.execute(query)

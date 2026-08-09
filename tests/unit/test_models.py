@@ -1,12 +1,18 @@
 """
 Unit tests for core models.
 """
-import pytest
-from datetime import datetime
 
 from continual_brain.core.models import (
-    Lesson, Skill, Memory, Refinement, Snapshot,
-    LessonStatus, SkillStatus, MemoryType, RefinementAction, RefinementStatus
+    Lesson,
+    LessonStatus,
+    Memory,
+    MemoryType,
+    Refinement,
+    RefinementAction,
+    RefinementStatus,
+    Skill,
+    SkillStatus,
+    Snapshot,
 )
 
 
@@ -23,7 +29,7 @@ class TestLesson:
         assert lesson.confidence == 0.8
         assert lesson.status == LessonStatus.ACCEPTED
         assert lesson.version == 1
-    
+
     def test_lesson_serialization(self):
         lesson = Lesson(
             title="Test",
@@ -33,7 +39,7 @@ class TestLesson:
         data = lesson.to_dict()
         assert data["title"] == "Test"
         assert data["confidence"] == 0.7
-        
+
         restored = Lesson.from_dict(data)
         assert restored.title == lesson.title
         assert restored.confidence == lesson.confidence
@@ -50,7 +56,7 @@ class TestSkill:
         )
         assert skill.name == "test_skill"
         assert skill.status == SkillStatus.DRAFT
-    
+
     def test_skill_serialization(self):
         skill = Skill(name="test", description="desc", code="code")
         data = skill.to_dict()
@@ -67,7 +73,7 @@ class TestMemory:
         )
         assert memory.content == "Test memory"
         assert memory.type == MemoryType.DECISION
-    
+
     def test_memory_serialization(self):
         memory = Memory(content="Test", importance=0.5)
         data = memory.to_dict()
@@ -87,7 +93,7 @@ class TestRefinement:
         assert ref.target_type == "lesson"
         assert ref.action == RefinementAction.UPDATE
         assert ref.status == RefinementStatus.PENDING
-    
+
     def test_refinement_serialization(self):
         ref = Refinement(
             target_type="skill",
@@ -107,7 +113,7 @@ class TestSnapshot:
         )
         assert snap.label == "test snapshot"
         assert snap.trigger == "manual"
-    
+
     def test_snapshot_serialization(self):
         snap = Snapshot(label="test", state={})
         data = snap.to_dict()
