@@ -1,0 +1,62 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.faiss
+*.pkl
+continual.db
+brain/
+continual_brain/__pycache__/
+
+# Environment
+.env
+*.env
+
+# Logs
+*.log
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+
+# Pre-commit
+.pre-commit-config.yaml
+
+# Local config
+config.local.yaml
+
+# Node
+node_modules/
