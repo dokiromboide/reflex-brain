@@ -89,45 +89,52 @@ class ContinualFAISSManager:
         return results
 
     def rebuild_from_store(self, store: SQLiteStore):
-        """Rebuild index from database."""
-        import asyncio
+            """Rebuild FAISS index from database."""
+            import asyncio
 
-        async def _rebuild():
-            self.index = get_faiss().IndexFlatIP(EMBED_DIM)
-            self.id_map = []
+            async def _rebuild():
+                self.index = get_faiss().IndexFlatIP(EMBED_DIM)
+                self.id_map = []
 
-            embedder = get_embedder()
+                embedder = get_embedder()
 
-            # Lessons
-            lessons = await store.list_lessons(status=None, limit=10000)
-            for lesson in lessons:
-                text = f"{lesson.title}\n{lesson.content}"
-                emb = embedder.encode(text)
-                self.add("lesson", lesson.id, emb)
+                # Lessons
+                lessons = await store.list_lessons(limit=10000)
+                for lesson in lessons:
+                    text = f"{lesson.title}\n{lesson.content}"
+                    emb = embedder.encode(text)
+                    self.add("lesson", lesson.id, emb)
 
-            # Skills
-            skills = await store.list_skills(status=None, limit=10000)
-            for skill in skills:
-                text = f"{skill.name}\n{skill.description}\n{skill.code}"
-                emb = embedder.encode(text)
-                self.add("skill", skill.id, emb)
+                # Skills
+                skills = await store.list_skills(limit=10000)
+                for skill in skills:
+                    text = f"{skill.name}\n{skill.description}\n{skill.code}"
+                    emb = embedder.encode(text)
+                    self.add("skill", skill.id, emb)
 
-            # Memories
-            memories = await store.list_memories(limit=10000)
-            for memory in memories:
-                text = f"{memory.content}\n{json.dumps(memory.context)}"
-                emb = embedder.encode(text)
-                self.add("memory", memory.id, emb)
+                # Memories
+                memories = await store.list_memories(limit=10000)
+                for memory in memories:
+                    text = f"{memory.content}\n{json.dumps(memory.context)}"
+                    emb = embedder.encode(text)
+                    self.add("memory", memory.id, emb)
 
-            self.save()
+                self.save()
 
-        try:
-            asyncio.run(_rebuild())
-        except RuntimeError:
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, _rebuild())
-                future.result()
+            # Run the async function properly
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If we're already in an async context, we can't use asyncio.run
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, _rebuild())
+                        future.result()
+                else:
+                    asyncio.run(_rebuild())
+            except RuntimeError:
+                # No event loop, create one
+                asyncio.run(_rebuild())
 
 
 import json

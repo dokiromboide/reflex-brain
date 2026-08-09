@@ -21,7 +21,7 @@ from continual_brain.core.refinement import RefinementEngine
 from continual_brain.core.store import SQLiteStore
 from continual_brain.query.hybrid_querier import HybridQuerier
 
-# Initialize core components
+# Initialize core components - LAZY
 DB_PATH = os.getenv("REFLEX_DB_PATH", "continual.db")
 BRAIN_NODES_DIR = os.getenv("REFLEX_BRAIN_NODES", "brain/nodes")
 BRAIN_EDGES_DIR = os.getenv("REFLEX_BRAIN_EDGES", "brain/edges")
@@ -30,17 +30,45 @@ BRAIN_FAISS_MAP = os.getenv("REFLEX_BRAIN_FAISS_MAP", "brain/brain_nodes_map.pkl
 CONTINUAL_FAISS_INDEX = os.getenv("REFLEX_CONTINUAL_FAISS", "continual_index.faiss")
 CONTINUAL_FAISS_MAP = os.getenv("REFLEX_CONTINUAL_FAISS_MAP", "continual_nodes_map.pkl")
 
-store = SQLiteStore(DB_PATH)
-querier = HybridQuerier(
-    store=store,
-    brain_nodes_dir=BRAIN_NODES_DIR,
-    brain_edges_dir=BRAIN_EDGES_DIR,
-    brain_faiss_index=BRAIN_FAISS_INDEX,
-    brain_faiss_map=BRAIN_FAISS_MAP,
-    continual_faiss_index=CONTINUAL_FAISS_INDEX,
-    continual_faiss_map=CONTINUAL_FAISS_MAP,
-)
-refinement_engine = RefinementEngine(store, querier.continual_querier)
+# Lazy initialization
+_store: SQLiteStore | None = None
+_querier: HybridQuerier | None = None
+_refinement_engine: RefinementEngine | None = None
+
+
+def _get_store() -> SQLiteStore:
+    global _store
+    if _store is None:
+        _store = SQLiteStore(os.getenv("REFLEX_DB_PATH", "continual.db"))
+    return _store
+
+
+def _get_querier() -> HybridQuerier:
+    global _querier
+    if _querier is None:
+        from continual_brain.query.hybrid_querier import HybridQuerier
+        store = _get_store()
+        _querier = HybridQuerier(
+            store=store,
+            brain_nodes_dir=os.getenv("REFLEX_BRAIN_NODES", "brain/nodes"),
+            brain_edges_dir=os.getenv("REFLEX_BRAIN_EDGES", "brain/edges"),
+            brain_faiss_index=os.getenv("REFLEX_BRAIN_FAISS", "brain/brain_index.faiss"),
+            brain_faiss_map=os.getenv("REFLEX_BRAIN_FAISS_MAP", "brain/brain_nodes_map.pkl"),
+            continual_faiss_index=os.getenv("REFLEX_CONTINUAL_FAISS", "continual_index.faiss"),
+            continual_faiss_map=os.getenv("REFLEX_CONTINUAL_FAISS_MAP", "continual_nodes_map.pkl"),
+        )
+    return _querier
+
+
+def _get_refinement_engine() -> RefinementEngine:
+    global _refinement_engine
+    if _refinement_engine is None:
+        from continual_brain.core.refinement import RefinementEngine
+        store = _get_store()
+        querier = _get_querier()
+        _refinement_engine = RefinementEngine(store, querier.continual_querier)
+    return _refinement_engine
+
 
 # MCP Server
 server = Server("reflex-brain")
@@ -186,6 +214,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_query(args: dict) -> list[TextContent]:
+    querier = _get_querier()
     results = await querier.query(
         query_text=args["query"],
         top_k=args.get("top_k", 5),
@@ -208,6 +237,7 @@ async def _handle_propose_lesson(args: dict) -> list[TextContent]:
             "hint": "Provide session messages or implement session store lookup"
         }))]
 
+    refinement_engine = _get_refinement_engine()
     proposals = await refinement_engine.analyze_session(args.get("session_id", "manual"), session_messages)
 
     if not proposals:
@@ -237,12 +267,14 @@ async def _handle_apply_refinement(args: dict) -> list[TextContent]:
 
 
 async def _handle_rollback(args: dict) -> list[TextContent]:
+    refinement_engine = _get_refinement_engine()
     success = await refinement_engine.rollback(args["refinement_id"])
     return [TextContent(type="text", text=json.dumps({"success": success}))]
 
 
 async def _handle_snapshot(args: dict) -> list[TextContent]:
     # Get current state
+    store = _get_store()
     lessons = await store.list_lessons(limit=1000)
     skills = await store.list_skills(limit=1000)
     memories = await store.list_memories(limit=1000)
@@ -265,6 +297,7 @@ async def _handle_snapshot(args: dict) -> list[TextContent]:
 
 
 async def _handle_get_lesson(args: dict) -> list[TextContent]:
+    store = _get_store()
     lesson = await store.get_lesson(args["lesson_id"])
     if lesson:
         return [TextContent(type="text", text=json.dumps(lesson.to_dict(), ensure_ascii=False))]
@@ -272,6 +305,7 @@ async def _handle_get_lesson(args: dict) -> list[TextContent]:
 
 
 async def _handle_get_skill(args: dict) -> list[TextContent]:
+    store = _get_store()
     skill = await store.get_skill(args["skill_id"])
     if skill:
         return [TextContent(type="text", text=json.dumps(skill.to_dict(), ensure_ascii=False))]
@@ -279,6 +313,7 @@ async def _handle_get_skill(args: dict) -> list[TextContent]:
 
 
 async def _handle_list_lessons(args: dict) -> list[TextContent]:
+    store = _get_store()
     status = None
     if args.get("status"):
         status = LessonStatus(args["status"])
@@ -287,6 +322,7 @@ async def _handle_list_lessons(args: dict) -> list[TextContent]:
 
 
 async def _handle_list_skills(args: dict) -> list[TextContent]:
+    store = _get_store()
     status = None
     if args.get("status"):
         status = SkillStatus(args["status"])

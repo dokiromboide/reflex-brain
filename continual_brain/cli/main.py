@@ -2,9 +2,9 @@
 CLI Entry Points - reflex-brain command line interface.
 """
 from __future__ import annotations
-from pathlib import Path
 
 import asyncio
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -26,7 +26,7 @@ def daemon(
     """Run the background processor daemon."""
     if daemonize:
         console.print("[yellow]Daemonize mode not yet implemented. Run in foreground with --daemonize flag.[/yellow]")
-    console.print(f"[green]Starting Reflex Brain daemon...[/green]")
+    console.print("[green]Starting Reflex Brain daemon...[/green]")
     console.print(f"Poll interval: {poll_interval}s, Batch size: {batch_size}")
     asyncio.run(run_daemon(poll_interval=poll_interval, batch_size=batch_size))
 
@@ -42,10 +42,10 @@ def query(
 ):
     """Query hybrid memory."""
     console.print(f"[green]Querying: [bold]{query_text}[/bold][/green]")
-    
+
     store = SQLiteStore(db_path)
     asyncio.run(store.initialize())
-    
+
     querier = HybridQuerier(
         store=store,
         brain_nodes_dir="brain/nodes",
@@ -55,9 +55,9 @@ def query(
         continual_faiss_index="continual_index.faiss",
         continual_faiss_map="continual_nodes_map.pkl",
     )
-    
+
     source_types_list = source_types.split(",") if source_types else None
-    
+
     results = asyncio.run(querier.query(
         query_text=query_text,
         top_k=top_k,
@@ -65,7 +65,7 @@ def query(
         expand_depth=expand_depth,
         min_confidence=min_confidence,
     ))
-    
+
     formatted = querier.format_results(results)
     console.print(formatted)
 
@@ -80,12 +80,12 @@ def list_lessons(
     """List lessons."""
     store = SQLiteStore(db_path)
     asyncio.run(store.initialize())
-    
+
     from continual_brain.core.models import LessonStatus
-    
+
     status_enum = LessonStatus(status) if status else None
     lessons = asyncio.run(store.list_lessons(status=status_enum, cluster_id=cluster_id, limit=limit))
-    
+
     table = Table(title="Lessons")
     table.add_column("ID", style="cyan")
     table.add_column("Title", style="green")
@@ -93,7 +93,7 @@ def list_lessons(
     table.add_column("Confidence", style="magenta")
     table.add_column("Status", style="blue")
     table.add_column("Cluster", style="dim")
-    
+
     for lesson in lessons:
         table.add_row(
             lesson.id[:20] + "...",
@@ -103,7 +103,7 @@ def list_lessons(
             lesson.status.value,
             lesson.cluster_id or "N/A",
         )
-    
+
     console.print(table)
 
 
@@ -116,19 +116,19 @@ def list_skills(
     """List skills."""
     store = SQLiteStore(db_path)
     asyncio.run(store.initialize())
-    
+
     from continual_brain.core.models import SkillStatus
-    
+
     status_enum = SkillStatus(status) if status else None
     skills = asyncio.run(store.list_skills(status=status_enum, limit=limit))
-    
+
     table = Table(title="Skills")
     table.add_column("ID", style="cyan")
     table.add_column("Name", style="green")
     table.add_column("Version", style="yellow")
     table.add_column("Confidence", style="magenta")
     table.add_column("Status", style="blue")
-    
+
     for skill in skills:
         table.add_row(
             skill.id[:20] + "...",
@@ -137,7 +137,7 @@ def list_skills(
             f"{skill.confidence:.2f}",
             skill.status.value,
         )
-    
+
     console.print(table)
 
 
@@ -147,17 +147,17 @@ def rebuild_index(
 ):
     """Rebuild FAISS index from database."""
     console.print("[green]Rebuilding FAISS index...[/green]")
-    
+
     store = SQLiteStore(db_path)
     asyncio.run(store.initialize())
-    
+
     from continual_brain.query.continual_querier import ContinualFAISSManager, ContinualQuerier
-    
+
     faiss_mgr = ContinualFAISSManager()
     querier = ContinualQuerier(store, faiss_mgr)
-    
+
     asyncio.run(querier.rebuild_index())
-    
+
     console.print("[green]Index rebuilt successfully![/green]")
 
 
@@ -167,13 +167,13 @@ def verify(
 ):
     """Run system verification checks."""
     console.print("[green]Running system verification...[/green]")
-    
+
     store = SQLiteStore(db_path)
     asyncio.run(store.initialize())
-    
+
     # Test store operations
     from continual_brain.core.models import Lesson, LessonStatus, Memory, Skill, SkillStatus
-    
+
     async def run_tests():
         # Test 1: Create and fetch lesson
         lesson = Lesson(
@@ -189,7 +189,7 @@ def verify(
         assert fetched is not None
         assert fetched.title == "Test Lesson"
         console.print("[green]✓[/green] Lesson CRUD works")
-        
+
         # Test 2: Create and fetch skill
         skill = Skill(
             id="test_skill_1",
@@ -204,7 +204,7 @@ def verify(
         fetched = await store.get_skill("test_skill_1")
         assert fetched is not None
         console.print("[green]✓[/green] Skill CRUD works")
-        
+
         # Test 3: Create and fetch memory
         memory = Memory(
             id="test_mem_1",
@@ -215,7 +215,7 @@ def verify(
         fetched = await store.get_memory("test_mem_1")
         assert fetched is not None
         console.print("[green]✓[/green] Memory CRUD works")
-        
+
         # Test 4: Hybrid query
         querier = HybridQuerier(
             store=store,
@@ -228,9 +228,9 @@ def verify(
         )
         results = await querier.query("test", top_k=3)
         console.print(f"[green]✓[/green] Hybrid query works ({len(results)} results)")
-        
+
         console.print("\n[bold green]All verification checks passed![/bold green]")
-    
+
     asyncio.run(run_tests())
 
 

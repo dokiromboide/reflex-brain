@@ -3,8 +3,9 @@ Hybrid Querier - Combines GraphRAG (conversations) + Continual (lessons/skills/m
 Unified query interface with source_type filtering.
 """
 from __future__ import annotations
-from pathlib import Path
+
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from continual_brain.core.store import SQLiteStore
@@ -32,30 +33,39 @@ class HybridQuerier:
     """
 
     def __init__(
-        self,
-        store: SQLiteStore,
-        # GraphRAG paths
-        brain_nodes_dir: str = "brain/nodes",
-        brain_edges_dir: str = "brain/edges",
-        brain_faiss_index: str = "brain/brain_index.faiss",
-        brain_faiss_map: str = "brain/brain_nodes_map.pkl",
-        # Continual paths
-        continual_faiss_index: str = "continual_index.faiss",
-        continual_faiss_map: str = "continual_nodes_map.pkl",
-    ):
-        self.store = store
+            self,
+            store: SQLiteStore,
+            # GraphRAG paths
+            brain_nodes_dir: str = "brain/nodes",
+            brain_edges_dir: str = "brain/edges",
+            brain_faiss_index: str = "brain/brain_index.faiss",
+            brain_faiss_map: str = "brain/brain_nodes_map.pkl",
+            # Continual paths
+            continual_faiss_index: str = None,
+            continual_faiss_map: str = None,
+        ):
+            self.store = store
 
-        # GraphRAG querier
-        self.brain_faiss = FAISSManager(brain_faiss_index, brain_faiss_map)
-        self.brain_querier = BrainQuerier(
-            self.brain_faiss,
-            Path(brain_nodes_dir),
-            Path(brain_edges_dir),
-        )
+            # Use environment variables if paths not provided
+            import os
+            if continual_faiss_index is None:
+                continual_faiss_index = os.getenv("REFLEX_FAISS_PATH", ".") + "/continual_index.faiss"
+            if continual_faiss_map is None:
+                continual_faiss_map = os.getenv("REFLEX_FAISS_PATH", ".") + "/continual_nodes_map.pkl"
 
-        # Continual querier
-        self.continual_faiss = ContinualFAISSManager(continual_faiss_index, continual_faiss_map)
-        self.continual_querier = ContinualQuerier(store, self.continual_faiss)
+            self.store = store
+
+            # GraphRAG querier
+            self.brain_faiss = FAISSManager(brain_faiss_index, brain_faiss_map)
+            self.brain_querier = BrainQuerier(
+                self.brain_faiss,
+                Path(brain_nodes_dir),
+                Path(brain_edges_dir),
+            )
+
+            # Continual querier
+            self.continual_faiss = ContinualFAISSManager(continual_faiss_index, continual_faiss_map)
+            self.continual_querier = ContinualQuerier(store, self.continual_faiss)
 
     async def query(
         self,

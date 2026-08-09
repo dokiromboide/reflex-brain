@@ -5,6 +5,7 @@ import os
 import tempfile
 
 import pytest
+from sqlalchemy import text
 
 from continual_brain.core.models import (
     Lesson,
@@ -183,7 +184,6 @@ class TestSQLiteStore:
     async def test_wal_mode(self, store):
         """Verify WAL mode is enabled."""
         async with store.session() as session:
-            from sqlalchemy import text
             result = await session.execute(text("PRAGMA journal_mode;"))
             mode = result.fetchone()[0]
             assert mode == "wal"
