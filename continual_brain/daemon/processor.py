@@ -495,7 +495,7 @@ class CommunityClassifier:
             logger.error(f"Clustering failed: {e}")
 
 
-async def run_daemon(poll_interval: float = 3.0, batch_size: int = 50):
+async def run_daemon(poll_interval: float = 3.0, batch_size: int = 50, enable_scheduler: bool = True):
     """Main daemon loop."""
     logger.info("Starting Reflex Brain daemon...")
 
@@ -512,36 +512,72 @@ async def run_daemon(poll_interval: float = 3.0, batch_size: int = 50):
     processor = MessageProcessor(extractor, node_writer, edge_writer, faiss_mgr, batch_embedder)
     classifier = CommunityClassifier()
 
+    # Initialize scheduler if enabled
+    scheduler = None
+    if enable_scheduler:
+        try:
+            from continual_brain.core.store import SQLiteStore
+            from continual_brain.query.hybrid_querier import HybridQuerier
+            from continual_brain.core.web_researcher import WebResearcher
+            from continual_brain.core.research_scheduler import create_scheduler, create_default_triggers
+            
+            continual_db = Path(os.getenv("REFLEX_DB_PATH", "continual.db"))
+            store = SQLiteStore(str(continual_db))
+            await store.initialize()
+            
+            querier = HybridQuerier(
+                store=store,
+                brain_nodes_dir="brain/nodes",
+                brain_edges_dir="brain/edges",
+                brain_faiss_index="brain/brain_index.faiss",
+                brain_faiss_map="brain/brain_nodes_map.pkl",
+                continual_faiss_index="continual_index.faiss",
+                continual_faiss_map="continual_nodes_map.pkl",
+            )
+            
+            web_researcher = WebResearcher(store)
+            scheduler = create_scheduler(store, querier, web_researcher)
+            create_default_triggers(scheduler)
+            await scheduler.start()
+            logger.info("Research scheduler started with default triggers")
+        except Exception as e:
+            logger.warning(f"Could not start scheduler: {e}")
+
     logger.info(f"Daemon state: processed={state.processed_count}, last_msg_id={state.last_message_id}")
 
-    while True:
-        try:
-            # Fetch new messages
-            rows = watcher.fetch_new_messages()
+    try:
+        while True:
+            try:
+                # Fetch new messages
+                rows = watcher.fetch_new_messages()
 
-            if rows:
-                # Process in batches
-                for i in range(0, len(rows), batch_size):
-                    batch = rows[i:i+batch_size]
-                    processor.process_batch(batch)
+                if rows:
+                    # Process in batches
+                    for i in range(0, len(rows), batch_size):
+                        batch = rows[i:i+batch_size]
+                        processor.process_batch(batch)
 
-                    for row in batch:
-                        state.last_message_id = row["id"]
-                        state.processed_count += 1
+                        for row in batch:
+                            state.last_message_id = row["id"]
+                            state.processed_count += 1
 
-                    state.last_run = datetime.utcnow().isoformat() + "Z"
-                    state.save()
+                        state.last_run = datetime.utcnow().isoformat() + "Z"
+                        state.save()
 
-                logger.info(f"Processed {len(rows)} messages. Total: {state.processed_count}")
+                    logger.info(f"Processed {len(rows)} messages. Total: {state.processed_count}")
 
-                # Run clustering every 50 messages
-                if state.processed_count % 50 == 0:
-                    classifier.run_clustering()
-            else:
-                logger.debug("No new messages")
+                    # Run clustering every 50 messages
+                    if state.processed_count % 50 == 0:
+                        classifier.run_clustering()
+                else:
+                    logger.debug("No new messages")
 
-            await asyncio.sleep(poll_interval)
+                await asyncio.sleep(poll_interval)
 
-        except Exception as e:
-            logger.error(f"Daemon error: {e}")
-            await asyncio.sleep(poll_interval * 2)
+            except Exception as e:
+                logger.error(f"Daemon error: {e}")
+                await asyncio.sleep(poll_interval * 2)
+    finally:
+        if scheduler:
+            await scheduler.stop()
+            logger.info("Research scheduler stopped")

@@ -54,6 +54,11 @@ class ResearchTask:
     updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     config: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        """Convert frequency string to enum if needed."""
+        if isinstance(self.frequency, str):
+            self.frequency = ScheduleFrequency(self.frequency)
+
 
 @dataclass
 class ResearchTrigger:
@@ -70,6 +75,11 @@ class ResearchTrigger:
     trigger_count: int = 0
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
+    def __post_init__(self):
+        """Convert trigger_type string to enum if needed."""
+        if isinstance(self.trigger_type, str):
+            self.trigger_type = TriggerType(self.trigger_type)
+
 
 @dataclass
 class ResearchJob:
@@ -84,6 +94,11 @@ class ResearchJob:
     completed_at: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+    def __post_init__(self):
+        """Convert trigger_type string to enum if needed."""
+        if isinstance(self.trigger_type, str):
+            self.trigger_type = TriggerType(self.trigger_type)
 
 
 class ResearchScheduler:
@@ -445,7 +460,16 @@ class ResearchScheduler:
             else:
                 next_run = now.replace(month=now.month + 1, day=1, hour=2, minute=0, second=0, microsecond=0)
         elif task.frequency == ScheduleFrequency.CUSTOM and task.cron_expression:
-            # Simplified: daily for custom
+            # Use croniter for custom cron expressions
+            try:
+                from croniter import croniter
+                cron = croniter(task.cron_expression, now)
+                next_run = cron.get_next(datetime)
+            except Exception as e:
+                print(f"Invalid cron expression: {task.cron_expression}, error: {e}")
+                next_run = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        elif task.frequency == ScheduleFrequency.CUSTOM:
+            # Custom frequency without cron expression - fall back to daily
             next_run = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=1)
         else:
             return None
