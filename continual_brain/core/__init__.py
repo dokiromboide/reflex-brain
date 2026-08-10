@@ -28,6 +28,16 @@ from continual_brain.core.web_researcher import (
     WebSearcher, SearchResult, ExtractedContent, ResearchProposal,
     research_topic
 )
+from continual_brain.core.research_scheduler import (
+    ResearchScheduler,
+    ResearchTask,
+    ResearchTrigger,
+    ResearchJob,
+    ScheduleFrequency,
+    TriggerType,
+    create_scheduler,
+    create_default_triggers,
+)
 
 __all__ = [
     # Models
@@ -43,4 +53,13 @@ __all__ = [
     "WebResearcher", "WebSearcher", "ContentExtractor", "KnowledgeSynthesizer",
     "SearchResult", "ExtractedContent", "ResearchProposal",
     "research_topic",
+    # Research Scheduler
+    "ResearchScheduler",
+    "ResearchTask",
+    "ResearchTrigger",
+    "ResearchJob",
+    "ScheduleFrequency",
+    "TriggerType",
+    "create_scheduler",
+    "create_default_triggers",
 ]

@@ -20,6 +20,13 @@ from continual_brain.core.models import (
 from continual_brain.core.refinement import RefinementEngine
 from continual_brain.core.store import SQLiteStore
 from continual_brain.query.hybrid_querier import HybridQuerier
+from continual_brain.core.research_scheduler import (
+    ResearchScheduler,
+    ResearchTask,
+    ResearchTrigger,
+    ScheduleFrequency,
+    TriggerType,
+)
 
 # Initialize core components - LAZY
 DB_PATH = os.getenv("REFLEX_DB_PATH", "continual.db")
@@ -34,6 +41,7 @@ CONTINUAL_FAISS_MAP = os.getenv("REFLEX_CONTINUAL_FAISS_MAP", "continual_nodes_m
 _store: SQLiteStore | None = None
 _querier: HybridQuerier | None = None
 _refinement_engine: RefinementEngine | None = None
+_scheduler: ResearchScheduler | None = None
 
 
 def _get_store() -> SQLiteStore:
@@ -68,6 +76,22 @@ def _get_refinement_engine() -> RefinementEngine:
         querier = _get_querier()
         _refinement_engine = RefinementEngine(store, querier.continual_querier)
     return _refinement_engine
+
+
+def _get_scheduler() -> ResearchScheduler:
+    global _scheduler
+    if _scheduler is None:
+        store = _get_store()
+        querier = _get_querier()
+        from continual_brain.core.web_researcher import WebResearcher
+        web_researcher = WebResearcher(store)
+        _scheduler = ResearchScheduler(
+            store=store,
+            hybrid_querier=_get_querier(),
+            web_researcher=web_researcher,
+            check_interval_seconds=300
+        )
+    return _scheduler
 
 
 # MCP Server
@@ -198,7 +222,80 @@ async def list_tools() -> list[Tool]:
                 "required": ["topic"],
             },
         ),
-    ]
+        Tool(
+            name="reflex_scheduler_add_task",
+            description="Add a scheduled research task",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Task name"},
+                    "topic": {"type": "string", "description": "Research topic"},
+                    "frequency": {"type": "string", "enum": ["hourly", "daily", "weekly", "monthly", "custom"], "default": "daily", "description": "Schedule frequency"},
+                    "cron_expression": {"type": "string", "description": "Custom cron expression (if frequency=custom)"},
+                    "max_sources": {"type": "integer", "default": 10, "description": "Maximum sources per run"},
+                    "create_lessons": {"type": "boolean", "default": True},
+                    "create_memories": {"type": "boolean", "default": True},
+                    "enabled": {"type": "boolean", "default": True},
+                },
+                "required": ["name", "topic"],
+            },
+        ),
+        Tool(
+            name="reflex_scheduler_remove_task",
+            description="Remove a scheduled research task",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task ID to remove"},
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="reflex_scheduler_list_tasks",
+            description="List scheduled research tasks",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "enabled_only": {"type": "boolean", "default": false},
+                },
+            },
+        ),
+        Tool(
+            name="reflex_scheduler_add_trigger",
+            description="Add a low-coverage trigger for automatic research",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Trigger name"},
+                    "topic_pattern": {"type": "string", "description": "Topic pattern (e.g., 'DIAN*', 'agente*')"},
+                    "min_coverage_threshold": {"type": "number", "default": 0.3, "description": "Minimum coverage score (0-1)"},
+                    "min_results_threshold": {"type": "integer", "default": 3, "description": "Minimum results threshold"},
+                    "cooldown_hours": {"type": "integer", "default": 24, "description": "Cooldown between triggers"},
+                    "enabled": {"type": "boolean", "default": true},
+                },
+                "required": ["name", "topic_pattern"],
+            },
+        ),
+        Tool(
+            name="reflex_scheduler_check_coverage",
+            description="Check knowledge coverage for a topic",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "Topic to check"},
+                },
+                "required": ["topic"],
+            },
+        ),
+        Tool(
+            name="reflex_scheduler_stats",
+            description="Get scheduler statistics",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
 
 
 @server.call_tool()
@@ -367,6 +464,79 @@ async def _handle_list_skills(args: dict) -> list[TextContent]:
         status = SkillStatus(args["status"])
     skills = await store.list_skills(status=status, limit=args.get("limit", 20))
     return [TextContent(type="text", text=json.dumps([s.to_dict() for s in skills], ensure_ascii=False))]
+
+
+async def _handle_scheduler_add_task(args: dict) -> list[TextContent]:
+    """Add a scheduled research task."""
+    scheduler = _get_scheduler()
+    task = ResearchTask(
+        name=args["name"],
+        topic=args["topic"],
+        frequency=ScheduleFrequency(args.get("frequency", "daily")),
+        cron_expression=args.get("cron_expression"),
+        max_sources=args.get("max_sources", 10),
+        create_lessons=args.get("create_lessons", True),
+        create_memories=args.get("create_memories", True),
+        enabled=args.get("enabled", True),
+    )
+    scheduler.add_task(task)
+    return [TextContent(type="text", text=json.dumps({"success": True, "task_id": task.id, "next_run": task.next_run}, ensure_ascii=False))]
+
+
+async def _handle_scheduler_remove_task(args: dict) -> list[TextContent]:
+    """Remove a scheduled research task."""
+    scheduler = _get_scheduler()
+    success = scheduler.remove_task(args["task_id"])
+    return [TextContent(type="text", text=json.dumps({"success": success}, ensure_ascii=False))]
+
+
+async def _handle_scheduler_list_tasks(args: dict) -> list[TextContent]:
+    """List scheduled research tasks."""
+    scheduler = _get_scheduler()
+    tasks = scheduler.list_tasks(enabled_only=args.get("enabled_only", False))
+    return [TextContent(type="text", text=json.dumps([{
+        "id": t.id,
+        "name": t.name,
+        "topic": t.topic,
+        "frequency": t.frequency.value,
+        "cron_expression": t.cron_expression,
+        "max_sources": t.max_sources,
+        "create_lessons": t.create_lessons,
+        "create_memories": t.create_memories,
+        "enabled": t.enabled,
+        "last_run": t.last_run,
+        "next_run": t.next_run,
+        "run_count": t.run_count,
+    } for t in tasks], ensure_ascii=False))]
+
+
+async def _handle_scheduler_add_trigger(args: dict) -> list[TextContent]:
+    """Add a low-coverage trigger."""
+    scheduler = _get_scheduler()
+    trigger = ResearchTrigger(
+        name=args["name"],
+        topic_pattern=args["topic_pattern"],
+        min_coverage_threshold=args.get("min_coverage_threshold", 0.3),
+        min_results_threshold=args.get("min_results_threshold", 3),
+        cooldown_hours=args.get("cooldown_hours", 24),
+        enabled=args.get("enabled", True),
+    )
+    scheduler.add_trigger(trigger)
+    return [TextContent(type="text", text=json.dumps({"success": True, "trigger_id": trigger.id}, ensure_ascii=False))]
+
+
+async def _handle_scheduler_check_coverage(args: dict) -> list[TextContent]:
+    """Check knowledge coverage for a topic."""
+    scheduler = _get_scheduler()
+    coverage = await scheduler.check_coverage(args["topic"])
+    return [TextContent(type="text", text=json.dumps(coverage, ensure_ascii=False, indent=2))]
+
+
+async def _handle_scheduler_stats(args: dict) -> list[TextContent]:
+    """Get scheduler statistics."""
+    scheduler = _get_scheduler()
+    stats = scheduler.get_stats()
+    return [TextContent(type="text", text=json.dumps(stats, ensure_ascii=False, indent=2))]
 
 
 async def main():
