@@ -257,7 +257,7 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "enabled_only": {"type": "boolean", "default": false},
+                    "enabled_only": {"type": "boolean", "default": False},
                 },
             },
         ),
@@ -272,7 +272,7 @@ async def list_tools() -> list[Tool]:
                     "min_coverage_threshold": {"type": "number", "default": 0.3, "description": "Minimum coverage score (0-1)"},
                     "min_results_threshold": {"type": "integer", "default": 3, "description": "Minimum results threshold"},
                     "cooldown_hours": {"type": "integer", "default": 24, "description": "Cooldown between triggers"},
-                    "enabled": {"type": "boolean", "default": true},
+                    "enabled": {"type": "boolean", "default": True},
                 },
                 "required": ["name", "topic_pattern"],
             },
@@ -296,6 +296,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+    ]
 
 
 @server.call_tool()
@@ -541,8 +542,10 @@ async def _handle_scheduler_stats(args: dict) -> list[TextContent]:
 
 async def main():
     """Initialize and run MCP server."""
+    store = _get_store()
     await store.initialize()
     # Rebuild continual index on startup
+    querier = _get_querier()
     await querier.continual_querier.rebuild_index()
 
     # Run server over stdio

@@ -25,14 +25,20 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Project specific
+# Database
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
+continual.db
+
+# FAISS / Pickle
 *.faiss
 *.pkl
-continual.db
+
+# Brain data
 brain/
 continual_brain/__pycache__/
 
