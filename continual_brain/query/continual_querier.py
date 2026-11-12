@@ -1,28 +1,27 @@
-"""
-Continual Brain Querier - Queries lessons, skills, and memories.
-Prioritizes high-confidence, production-ready knowledge.
-"""
+"""SQLite-authoritative semantic retrieval with revision-aware derived FAISS indexes."""
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import os
+import tempfile
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
 from continual_brain.core.store import SQLiteStore
 
-# Lazy imports
+logger = logging.getLogger(__name__)
 _embedder = None
 _faiss = None
-_np = None
+EMBED_DIM = 384
 
 def get_embedder():
     global _embedder
     if _embedder is None:
         from sentence_transformers import SentenceTransformer
-        model_name = os.getenv("REFLEX_EMBED_MODEL", "all-MiniLM-L6-v2")
-        _embedder = SentenceTransformer(model_name)
+        _embedder = SentenceTransformer(os.getenv("REFLEX_EMBED_MODEL", "all-MiniLM-L6-v2"))
     return _embedder
 
 def get_faiss():
@@ -33,203 +32,172 @@ def get_faiss():
     return _faiss
 
 def get_np():
-    global _np
-    if _np is None:
-        import numpy as np
-        _np = np
-    return _np
-
-
-EMBED_DIM = 384
+    return np
 
 
 class ContinualFAISSManager:
-    """FAISS index for continual memory (lessons, skills, memories)."""
+    """One atomically replaced, non-pickle archive containing vectors, IDs and revision."""
 
-    def __init__(self, index_path: str = "continual_index.faiss", map_path: str = "continual_nodes_map.pkl"):
-        self.index_path = Path(index_path)
-        self.map_path = Path(map_path)
-        self.index = None
-        self.id_map = []  # list of (entity_type, entity_id)
+    def __init__(self, index_path=None, map_path=None):
+        root = Path(os.getenv("REFLEX_FAISS_PATH", ".")).expanduser()
+        self.index_path = Path(index_path) if index_path else root / "continual_index.faiss"
+        self.map_path = Path(map_path) if map_path else root / "continual_nodes_map.json"
+        self.index = get_faiss().IndexFlatIP(EMBED_DIM)
+        self.id_map = []
+        self.generation = None
         self._load()
 
     def _load(self):
-        if self.index_path.exists():
-            self.index = get_faiss().read_index(str(self.index_path))
-            import pickle
-            with open(self.map_path, "rb") as f:
-                self.id_map = pickle.load(f)
-        else:
-            self.index = get_faiss().IndexFlatIP(EMBED_DIM)
-            self.id_map = []
+        if not self.index_path.exists():
+            return
+        try:
+            with np.load(self.index_path, allow_pickle=False) as archive:
+                index = get_faiss().deserialize_index(archive["index"])
+                ids = json.loads(str(archive["ids"].item()))
+                generation = json.loads(str(archive["generation"].item()))
+            if len(ids) != index.ntotal or any(len(x) != 2 for x in ids):
+                raise ValueError("Vector/ID count mismatch")
+            self.index, self.id_map, self.generation = index, ids, generation
+        except Exception:
+            # Indexes are disposable. Never deserialize legacy pickle maps.
+            logger.warning("Ignoring legacy or invalid continual index; it will rebuild from SQLite")
 
     def save(self):
-        get_faiss().write_index(self.index, str(self.index_path))
-        import pickle
-        with open(self.map_path, "wb") as f:
-            pickle.dump(self.id_map, f)
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(dir=self.index_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                np.savez_compressed(stream, index=get_faiss().serialize_index(self.index),
+                                    ids=np.asarray(json.dumps(self.id_map)),
+                                    generation=np.asarray(json.dumps(self.generation)))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, self.index_path)
+        finally:
+            Path(name).unlink(missing_ok=True)
 
-    def add(self, entity_type: str, entity_id: str, embedding: np.ndarray):
-        faiss_id = self.index.ntotal
-        self.index.add(get_np().array(embedding).reshape(1, -1).astype(get_np().float32))
-        self.id_map.append((entity_type, entity_id))
+    def add(self, entity_type, entity_id, embedding):
+        key = [entity_type, entity_id]
+        if key in [list(x) for x in self.id_map]:
+            raise ValueError("Duplicate vector ID")
+        vector = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
+        get_faiss().normalize_L2(vector)
+        self.index.add(vector)
+        self.id_map.append(key)
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> list[tuple[str, str, float]]:
-        if self.index.ntotal == 0:
+    def search(self, query_embedding, top_k=5):
+        if not self.index.ntotal:
             return []
-        scores, indices = self.index.search(
-            get_np().array(query_embedding).reshape(1, -1).astype(get_np().float32),
-            top_k
-        )
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if 0 <= idx < len(self.id_map):
-                entity_type, entity_id = self.id_map[idx]
-                results.append((entity_type, entity_id, float(score)))
-        return results
-
-    def rebuild_from_store(self, store: SQLiteStore):
-            """Rebuild FAISS index from database."""
-            import asyncio
-
-            async def _rebuild():
-                self.index = get_faiss().IndexFlatIP(EMBED_DIM)
-                self.id_map = []
-
-                embedder = get_embedder()
-
-                # Lessons
-                lessons = await store.list_lessons(limit=10000)
-                for lesson in lessons:
-                    text = f"{lesson.title}\n{lesson.content}"
-                    emb = embedder.encode(text)
-                    self.add("lesson", lesson.id, emb)
-
-                # Skills
-                skills = await store.list_skills(limit=10000)
-                for skill in skills:
-                    text = f"{skill.name}\n{skill.description}\n{skill.code}"
-                    emb = embedder.encode(text)
-                    self.add("skill", skill.id, emb)
-
-                # Memories
-                memories = await store.list_memories(limit=10000)
-                for memory in memories:
-                    text = f"{memory.content}\n{json.dumps(memory.context)}"
-                    emb = embedder.encode(text)
-                    self.add("memory", memory.id, emb)
-
-                self.save()
-
-            # Run the async function properly
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If we're already in an async context, we can't use asyncio.run
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(asyncio.run, _rebuild())
-                        future.result()
-                else:
-                    asyncio.run(_rebuild())
-            except RuntimeError:
-                # No event loop, create one
-                asyncio.run(_rebuild())
-
-
-import json
+        vector = np.asarray(query_embedding, dtype=np.float32).reshape(1, -1)
+        get_faiss().normalize_L2(vector)
+        scores, indices = self.index.search(vector, min(top_k, self.index.ntotal))
+        return [(self.id_map[i][0], self.id_map[i][1], float(score))
+                for score, i in zip(scores[0], indices[0]) if 0 <= i < len(self.id_map)]
 
 
 class ContinualQuerier:
-    """
-    Query layer for continual memory (lessons, skills, memories).
-    Prioritizes high-confidence, production-ready knowledge.
-    """
-
-    def __init__(self, store: SQLiteStore, faiss_mgr: ContinualFAISSManager | None = None):
+    def __init__(self, store: SQLiteStore, faiss_mgr=None):
         self.store = store
         self.faiss = faiss_mgr or ContinualFAISSManager()
+        self._index_lock = asyncio.Lock()
 
-    async def query(
-        self,
-        query_text: str,
-        top_k: int = 5,
-        source_types: list[str] | None = None,  # ["lesson", "skill", "memory"]
-        min_confidence: float = 0.0,
-        status_filter: str | None = None,  # "accepted", "production", etc.
-    ) -> list[dict[str, Any]]:
-        """
-        Query continual memory.
-        Returns list of dicts with entity data + score.
-        """
-        # 1. Vector search
+    async def _ensure_index(self, force=False):
+        async with self._index_lock:
+            generation = [self.store.db_path, await self.store.content_revision(),
+                          os.getenv("REFLEX_EMBED_MODEL", "all-MiniLM-L6-v2"), 1]
+            if not force and self.faiss.generation == generation:
+                return
+            async with self.store.transaction():
+                state = await self.store.export_state()
+                generation[1] = await self.store.content_revision()
+            texts, ids = [], []
+            for kind, entries in state.items():
+                for entry in entries:
+                    if kind == "lessons":
+                        content = entry["title"] + "\n" + entry["content"]
+                    elif kind == "skills":
+                        content = entry["name"] + "\n" + entry["description"] + "\n" + entry["code"]
+                    else:
+                        content = entry["content"]
+                    texts.append(content)
+                    ids.append([kind[:-1] if kind != "memories" else "memory", entry["id"]])
+            # Initialize native ML modules on the main thread. Importing SciPy's
+            # extension modules for the first time in a Windows worker can hang.
+            # Encoding remains off the event loop after this one-time load.
+            embedder = get_embedder() if texts else None
+            def build():
+                if texts:
+                    vectors = np.asarray(embedder.encode(texts, batch_size=32,
+                        show_progress_bar=False, normalize_embeddings=True), dtype=np.float32)
+                    get_faiss().normalize_L2(vectors)
+                    index = get_faiss().IndexFlatIP(vectors.shape[1])
+                    index.add(vectors)
+                else:
+                    index = get_faiss().IndexFlatIP(EMBED_DIM)
+                return index
+            index = await asyncio.to_thread(build)
+            previous = self.faiss.index, self.faiss.id_map, self.faiss.generation
+            self.faiss.index, self.faiss.id_map, self.faiss.generation = index, ids, generation
+            try:
+                # Keep this short commit synchronous: no other coroutine sees a half-published index.
+                self.faiss.save()
+            except BaseException:
+                self.faiss.index, self.faiss.id_map, self.faiss.generation = previous
+                raise
+
+    async def rebuild_index(self):
+        await self._ensure_index(force=True)
+
+    async def query(self, query_text, top_k=5, source_types=None, min_confidence=0.0,
+                    status_filter=None, include_untrusted=False):
+        await self._ensure_index()
+        if not self.faiss.index.ntotal:
+            return []
         embedder = get_embedder()
-        query_emb = embedder.encode(query_text)
-        candidates = self.faiss.search(query_emb, top_k * 3)
-
-        # 2. Fetch and filter
+        vector = await asyncio.to_thread(lambda: embedder.encode(query_text, normalize_embeddings=True))
+        # Filter before the final top-k, so unrelated/proposed entities cannot crowd accepted results out.
+        candidates = self.faiss.search(vector, self.faiss.index.ntotal)
         results = []
-        for entity_type, entity_id, vector_score in candidates:
-            if source_types and entity_type not in source_types:
+        for kind, entity_id, score in candidates:
+            if source_types and kind not in source_types:
                 continue
-
-            entity = await self._fetch_entity(entity_type, entity_id)
-            if not entity:
+            entity = await self._fetch_entity(kind, entity_id)
+            if entity is None:
                 continue
-
-            # Confidence filter (for Memory, use importance as confidence)
-            entity_confidence = entity.confidence if entity_type != "memory" else entity.importance
-            if entity_confidence < min_confidence:
+            status = getattr(entity, "status", None)
+            if status_filter and (status is None or status.value != status_filter):
                 continue
-
-            # Status filter
-            if status_filter:
-                entity_status = getattr(entity, 'status', None)
-                if entity_status and entity_status.value != status_filter:
+            if not status_filter and not include_untrusted:
+                if kind == "lesson" and status.value != "accepted":
                     continue
-
-            # Combined score
-            entity_confidence = entity.confidence if entity_type != "memory" else entity.importance
-            combined = vector_score * (0.5 + entity_confidence)
-
-            results.append({
-                "type": entity_type,
-                "entity": entity,
-                "vector_score": vector_score,
-                "confidence": entity_confidence,
-                "combined_score": combined,
-            })
-
-        # 3. Sort by combined score
-        results.sort(key=lambda x: x["combined_score"], reverse=True)
+                if kind == "skill" and status.value not in ("tested", "production"):
+                    continue
+                if kind == "memory" and entity.context.get("trust_level") == "untrusted":
+                    continue
+            confidence = entity.importance if kind == "memory" else entity.confidence
+            if confidence < min_confidence:
+                continue
+            results.append({"type": kind, "entity": entity, "vector_score": score,
+                            "confidence": confidence, "combined_score": score * (0.5 + confidence)})
+        results.sort(key=lambda item: item["combined_score"], reverse=True)
         return results[:top_k]
 
-    async def _fetch_entity(self, entity_type: str, entity_id: str):
-        if entity_type == "lesson":
-            return await self.store.get_lesson(entity_id)
-        if entity_type == "skill":
-            return await self.store.get_skill(entity_id)
-        if entity_type == "memory":
-            return await self.store.get_memory(entity_id)
-        return None
+    async def _fetch_entity(self, kind, entity_id):
+        if kind not in ("lesson", "skill", "memory"):
+            return None
+        return await getattr(self.store, f"get_{kind}")(entity_id)
 
-    async def get_lesson(self, lesson_id: str) -> dict | None:
-        lesson = await self.store.get_lesson(lesson_id)
-        if lesson:
-            return {"type": "lesson", "entity": lesson}
-        return None
+    async def get_lesson(self, entity_id):
+        entity = await self.store.get_lesson(entity_id)
+        return {"type": "lesson", "entity": entity} if entity else None
 
-    async def get_skill(self, skill_id: str) -> dict | None:
-        skill = await self.store.get_skill(skill_id)
-        if skill:
-            return {"type": "skill", "entity": skill}
-        return None
+    async def get_skill(self, entity_id):
+        entity = await self.store.get_skill(entity_id)
+        return {"type": "skill", "entity": entity} if entity else None
 
-    async def get_memory(self, memory_id: str) -> dict | None:
-        memory = await self.store.get_memory(memory_id)
-        if memory:
-            return {"type": "memory", "entity": memory}
-        return None
+    async def get_memory(self, entity_id):
+        entity = await self.store.get_memory(entity_id)
+        return {"type": "memory", "entity": entity} if entity else None
 
     def format_results(self, results: list[dict]) -> str:
         """Format results as markdown context."""
@@ -268,7 +236,3 @@ class ContinualQuerier:
             lines.append("")
 
         return "\n".join(lines)
-
-    async def rebuild_index(self):
-        """Rebuild FAISS index from database."""
-        self.faiss.rebuild_from_store(self.store)

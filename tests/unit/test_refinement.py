@@ -134,7 +134,7 @@ class TestRefinementEngine:
             confidence_delta=0.6,
         )
 
-        success, ref_id = await engine.apply_refinement(proposal, auto_apply=True)
+        success, ref_id = await engine.apply_refinement(proposal, approved=True)
 
         assert success
         assert ref_id is not None

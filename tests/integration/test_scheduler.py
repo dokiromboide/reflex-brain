@@ -278,16 +278,10 @@ class TestResearchScheduler:
         next_run = scheduler._calculate_next_run(task)
         assert next_run is not None
         
-        # Test custom without cron (should fall back to daily)
-        task = ResearchTask(
-            name="Custom No Cron",
-            topic="test",
-            frequency=ScheduleFrequency.CUSTOM,
-            cron_expression=None,
-        )
-        next_run = scheduler._calculate_next_run(task)
-        assert next_run is not None
-    
+        # Invalid schedules must be reported instead of silently becoming daily.
+        with pytest.raises(ValueError, match="cron_expression"):
+            ResearchTask(name="Custom No Cron", topic="test", frequency=ScheduleFrequency.CUSTOM)
+
     @pytest.mark.asyncio
     async def test_get_stats(self, temp_store, temp_querier, temp_web_researcher):
         """Test scheduler statistics."""
