@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from pathlib import Path
 
-from sqlalchemy import Column, Float, Integer, String, Text, delete, select, update
+from sqlalchemy import Column, Float, Integer, String, Text, delete, select, update, text
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
@@ -72,6 +75,7 @@ class MemoryORM(Base):
     last_accessed = Column(String, nullable=True)
     access_count = Column(Integer, default=0)
     cluster_id = Column(String, nullable=True)
+    tags = Column(Text, nullable=False, default="[]")
     created_at = Column(String, nullable=False)
 
 
@@ -101,11 +105,20 @@ class SnapshotORM(Base):
     trigger = Column(String, default="manual")
 
 
+class ProposalORM(Base):
+    __tablename__ = "proposals"
+    id = Column(String, primary_key=True)
+    payload = Column(Text, nullable=False)
+    refinement_id = Column(String, nullable=True)
+
+
 class SQLiteStore:
     """Async SQLite store with WAL mode for concurrent access."""
 
     def __init__(self, db_path: str):
+        db_path = str(Path(db_path).expanduser().resolve())
         self.db_path = db_path
+        self._active_session = ContextVar(f"store_session_{id(self)}", default=None)
         # Ensure directory exists
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
 
@@ -128,6 +141,24 @@ class SQLiteStore:
             await conn.exec_driver_sql("PRAGMA cache_size=-32768;")  # 32MB cache
             await conn.exec_driver_sql("PRAGMA temp_store=MEMORY;")
             await conn.run_sync(Base.metadata.create_all)
+            # Additive, idempotent upgrade of the 0.1 schema; preserves existing data.
+            columns = await conn.exec_driver_sql("PRAGMA table_info(memories)")
+            if "tags" not in {row[1] for row in columns}:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE memories ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"
+                )
+            await conn.exec_driver_sql(
+                "CREATE TABLE IF NOT EXISTS content_revision "
+                "(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL)"
+            )
+            await conn.exec_driver_sql("INSERT OR IGNORE INTO content_revision VALUES (1, 0)")
+            for table in ("lessons", "skills", "memories"):
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    await conn.exec_driver_sql(
+                        f"CREATE TRIGGER IF NOT EXISTS revision_{table}_{operation} "
+                        f"AFTER {operation} ON {table} BEGIN "
+                        "UPDATE content_revision SET revision=revision+1 WHERE id=1; END"
+                    )
 
     async def close(self):
         await self.engine.dispose()
@@ -135,6 +166,13 @@ class SQLiteStore:
     @asynccontextmanager
     async def session(self):
         """Get a database session."""
+        active = self._active_session.get()
+        if active:
+            owner, session = active
+            if owner is not asyncio.current_task():
+                raise RuntimeError("A transaction cannot be shared between asyncio tasks")
+            yield session
+            return
         async with self.session_factory() as session:
             try:
                 yield session
@@ -142,6 +180,74 @@ class SQLiteStore:
             except Exception:
                 await session.rollback()
                 raise
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Serialize writers across processes and commit all nested store operations together."""
+        if self._active_session.get():
+            async with self.session() as session:
+                yield session
+            return
+        async with self.session_factory() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            token = self._active_session.set((asyncio.current_task(), session))
+            try:
+                yield session
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
+            finally:
+                self._active_session.reset(token)
+
+    async def content_revision(self):
+        async with self.session() as session:
+            return int((await session.execute(text(
+                "SELECT revision FROM content_revision WHERE id=1"
+            ))).scalar_one())
+
+    async def export_state(self):
+        """Complete consistent entity snapshot, without the former per-type row limit."""
+        async with self.transaction():
+            state = {}
+            for name, orm, convert in (
+                ("lessons", LessonORM, self._lesson_orm_to_model),
+                ("skills", SkillORM, self._skill_orm_to_model),
+                ("memories", MemoryORM, self._memory_orm_to_model),
+            ):
+                async with self.session() as session:
+                    rows = (await session.execute(select(orm).order_by(orm.id))).scalars()
+                    state[name] = [convert(row).to_dict() for row in rows]
+            return state
+
+    async def save_proposal(self, proposal_id, payload, refinement_id=None):
+        async with self.session() as session:
+            row = await session.get(ProposalORM, proposal_id)
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            if row:
+                if row.payload != encoded:
+                    raise ValueError("Proposal ID already exists with different content")
+                if refinement_id:
+                    row.refinement_id = refinement_id
+            else:
+                session.add(ProposalORM(id=proposal_id, payload=encoded,
+                                        refinement_id=refinement_id))
+            await session.flush()
+
+    async def get_proposal(self, proposal_id):
+        async with self.session() as session:
+            row = await session.get(ProposalORM, proposal_id)
+            return {"proposal": json.loads(row.payload), "refinement_id": row.refinement_id} if row else None
+
+    async def list_proposals(self, limit=100):
+        async with self.session() as session:
+            rows = (await session.execute(select(ProposalORM).limit(limit))).scalars()
+            return [{"proposal": json.loads(row.payload), "refinement_id": row.refinement_id} for row in rows]
+
+    async def delete_skill(self, skill_id):
+        async with self.session() as session:
+            result = await session.execute(delete(SkillORM).where(SkillORM.id == skill_id))
+            return result.rowcount > 0
 
     # ============ Lessons ============
 
@@ -171,7 +277,8 @@ class SQLiteStore:
             return [self._lesson_orm_to_model(orm) for orm in result.scalars().all()]
 
     async def upsert_lesson(self, lesson: Lesson) -> Lesson:
-        async with self.session() as session:
+        lesson.__post_init__()
+        async with self.transaction() as session:
             # Check if exists
             existing = await session.execute(
                 select(LessonORM).where(LessonORM.id == lesson.id)
@@ -243,7 +350,8 @@ class SQLiteStore:
             return [self._skill_orm_to_model(orm) for orm in result.scalars().all()]
 
     async def upsert_skill(self, skill: Skill) -> Skill:
-        async with self.session() as session:
+        skill.__post_init__()
+        async with self.transaction() as session:
             existing = await session.execute(
                 select(SkillORM).where(SkillORM.id == skill.id)
             )
@@ -313,7 +421,8 @@ class SQLiteStore:
             return [self._memory_orm_to_model(orm) for orm in result.scalars().all()]
 
     async def upsert_memory(self, memory: Memory) -> Memory:
-        async with self.session() as session:
+        memory.__post_init__()
+        async with self.transaction() as session:
             existing = await session.execute(
                 select(MemoryORM).where(MemoryORM.id == memory.id)
             )
@@ -328,6 +437,7 @@ class SQLiteStore:
                 orm.last_accessed = memory.last_accessed
                 orm.access_count = memory.access_count
                 orm.cluster_id = memory.cluster_id
+                orm.tags = json.dumps(memory.tags, ensure_ascii=False)
             else:
                 orm = MemoryORM(
                     id=memory.id,
@@ -339,6 +449,7 @@ class SQLiteStore:
                     last_accessed=memory.last_accessed,
                     access_count=memory.access_count,
                     cluster_id=memory.cluster_id,
+                    tags=json.dumps(memory.tags, ensure_ascii=False),
                     created_at=memory.created_at,
                 )
                 session.add(orm)
@@ -504,6 +615,7 @@ class SQLiteStore:
             access_count=orm.access_count,
             cluster_id=orm.cluster_id,
             created_at=orm.created_at,
+            tags=json.loads(orm.tags),
         )
 
     def _refinement_orm_to_model(self, orm: RefinementORM) -> Refinement:

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Any
 
@@ -36,6 +36,15 @@ class RefinementProposal:
     evidence: list[dict[str, Any]]
     evidence_weight: float
     confidence_delta: float
+
+    id: str = field(default_factory=lambda: f"proposal_{uuid.uuid4().hex[:12]}")
+
+    def to_dict(self):
+        return {**asdict(self), "action": self.action.value}
+
+    @classmethod
+    def from_dict(cls, value):
+        return cls(**{**value, "action": RefinementAction(value["action"])})
 
 
 class EvidenceExtractor:
@@ -269,6 +278,8 @@ class RefinementEngine:
         lesson_id = f"lesson_{uuid.uuid4().hex[:12]}"
 
         diff = {
+            "title": {"old": None, "new": title},
+            "cluster_id": {"old": None, "new": topic},
             "content": {"old": None, "new": content},
             "confidence": {"old": 0.0, "new": 0.6},
             "evidence": {"old": [], "new": evidence},
@@ -354,153 +365,115 @@ class RefinementEngine:
 
     # ============ Application & Rollback ============
 
-    async def apply_refinement(
-        self,
-        proposal: RefinementProposal,
-        auto_apply: bool = False,
-        proposed_by: str = "agent"
-    ) -> tuple[bool, str | None]:
-        """
-        Apply a refinement proposal.
-        Returns (success, refinement_id).
-        """
-        # Check threshold
-        if not auto_apply and proposal.evidence_weight < self.auto_apply_threshold:
+
+    async def apply_refinement(self, proposal, auto_apply=False, proposed_by="agent", approved=False):
+        """Apply once. Automatic lessons require evidence; explicit approval is separate."""
+        if not approved and not (auto_apply and proposal.target_type == "lesson"
+                                 and proposal.evidence_weight >= self.auto_apply_threshold):
             return False, None
-
-        # Create snapshot before applying
-        snapshot = await self._create_pre_refinement_snapshot(proposal.target_id, proposal.target_type)
-
-        # Create refinement record
-        refinement = Refinement(
-            id=f"ref_{uuid.uuid4().hex[:12]}",
-            target_type=proposal.target_type,
-            target_id=proposal.target_id,
-            action=proposal.action,
-            proposed_by=proposed_by,
-            evidence=proposal.evidence,
-            diff=proposal.diff,
-            confidence_delta=proposal.confidence_delta,
-            status=RefinementStatus.APPLIED,
-            applied_at=datetime.utcnow().isoformat() + "Z",
-            snapshot_id=snapshot.id if snapshot else None,
-        )
-
-        # Apply the diff based on target type
-        success = await self._apply_diff(proposal)
-
-        if success:
+        if proposal.target_type not in ("lesson", "skill"):
+            raise ValueError("Only lesson and skill refinements are supported")
+        if proposal.action not in (RefinementAction.CREATE, RefinementAction.UPDATE,
+                                   RefinementAction.DEPRECATE, RefinementAction.SUPERSEDE):
+            raise ValueError("Unsupported refinement action")
+        async with self.store.transaction():
+            saved = await self.store.get_proposal(proposal.id)
+            if saved and saved["proposal"] != proposal.to_dict():
+                raise ValueError("Stored proposal does not match")
+            if saved and saved["refinement_id"]:
+                previous = await self.store.get_refinement(saved["refinement_id"])
+                if previous and previous.status == RefinementStatus.APPLIED:
+                    return True, previous.id
+                raise ValueError("A reverted proposal cannot be applied again; create a new proposal")
+            getter = getattr(self.store, f"get_{proposal.target_type}")
+            entity = await getter(proposal.target_id)
+            if proposal.action == RefinementAction.CREATE:
+                if entity or proposal.target_version != 1:
+                    raise ValueError("CREATE requires a new target and version 1")
+            elif not entity or entity.version + 1 != proposal.target_version:
+                raise ValueError("Stale proposal: target version has changed or target is missing")
+            snapshot = await self._create_pre_refinement_snapshot(proposal.target_id, proposal.target_type)
+            await self.store.save_proposal(proposal.id, proposal.to_dict())
+            await self.store.create_snapshot(snapshot)
+            await self._apply_diff(proposal)
+            after = (await getter(proposal.target_id)).to_dict()
+            refinement = Refinement(
+                target_type=proposal.target_type, target_id=proposal.target_id,
+                action=proposal.action, proposed_by=proposed_by, evidence=proposal.evidence,
+                diff={**proposal.diff, "__after__": after},
+                confidence_delta=proposal.confidence_delta, status=RefinementStatus.APPLIED,
+                applied_at=datetime.utcnow().isoformat() + "Z", snapshot_id=snapshot.id,
+            )
             await self.store.upsert_refinement(refinement)
-            if snapshot:
-                await self.store.create_snapshot(snapshot)
+            await self.store.save_proposal(proposal.id, proposal.to_dict(), refinement.id)
             return True, refinement.id
-        refinement.status = RefinementStatus.REJECTED
-        await self.store.upsert_refinement(refinement)
-        return False, None
 
-    async def _apply_diff(self, proposal: RefinementProposal) -> bool:
-        """Apply the diff to the target entity."""
-        try:
-            if proposal.target_type == "lesson":
-                lesson = await self.store.get_lesson(proposal.target_id)
-                if not lesson and proposal.action == RefinementAction.CREATE:
-                    lesson = Lesson(
-                        id=proposal.target_id,
-                        version=proposal.target_version,
-                    )
-                if lesson:
-                    for field_name, change in proposal.diff.items():
-                        if field_name == "content":
-                            lesson.content = change["new"]
-                        elif field_name == "confidence":
-                            lesson.confidence = change["new"]
-                        elif field_name == "evidence":
-                            lesson.evidence = change["new"]
-                        elif field_name == "updated_at":
-                            lesson.updated_at = change["new"]
-                    lesson.version = proposal.target_version
-                    lesson.status = LessonStatus.ACCEPTED
-                    await self.store.upsert_lesson(lesson)
-                    return True
-
-            elif proposal.target_type == "skill":
-                skill = await self.store.get_skill(proposal.target_id)
-                if not skill and proposal.action == RefinementAction.CREATE:
-                    skill = Skill(
-                        id=proposal.target_id,
-                        version=proposal.target_version,
-                    )
-                if skill:
-                    for field_name, change in proposal.diff.items():
-                        if field_name == "code":
-                            skill.code = change["new"]
-                        elif field_name == "interface":
-                            skill.interface = change["new"]
-                    skill.version = proposal.target_version
-                    skill.status = SkillStatus.TESTED
-                    await self.store.upsert_skill(skill)
-                    return True
-
-            return False
-        except Exception:
-            return False
-
-    async def _create_pre_refinement_snapshot(
-        self,
-        target_id: str,
-        target_type: str
-    ) -> Snapshot | None:
-        """Create a snapshot of relevant state before refinement."""
-        # Get current state of target + related
-        state = {"lessons": [], "skills": [], "memories": []}
-
-        if target_type == "lesson":
-            lesson = await self.store.get_lesson(target_id)
-            if lesson:
-                state["lessons"].append(lesson.to_dict())
-        elif target_type == "skill":
-            skill = await self.store.get_skill(target_id)
-            if skill:
-                state["skills"].append(skill.to_dict())
-
-        snapshot = Snapshot(
-            id=f"snap_{uuid.uuid4().hex[:12]}",
-            label=f"pre-refine-{target_type}-{target_id[:8]}",
-            state=state,
-            trigger="pre-refine",
-        )
-        return snapshot
-
-    async def rollback(self, refinement_id: str) -> bool:
-        """Rollback a refinement using its snapshot."""
-        refinement = await self.store.get_refinement(refinement_id)
-        if not refinement or not refinement.snapshot_id:
-            return False
-
-        snapshot = await self.store.get_snapshot(refinement.snapshot_id)
-        if not snapshot:
-            return False
-
-        # Restore state from snapshot
-        for lesson_data in snapshot.state.get("lessons", []):
-            lesson = Lesson.from_dict(lesson_data)
-            await self.store.upsert_lesson(lesson)
-
-        for skill_data in snapshot.state.get("skills", []):
-            skill = Skill.from_dict(skill_data)
-            await self.store.upsert_skill(skill)
-
-        # For CREATE actions, the target didn't exist before, so delete it
-        if refinement.action == RefinementAction.CREATE:
-            if refinement.target_type == "lesson":
-                await self.store.delete_lesson(refinement.target_id)
-            elif refinement.target_type == "skill":
-                # Add delete_skill method if needed
-                pass
-
-        # Update refinement status
-        refinement.status = RefinementStatus.ROLLED_BACK
-        refinement.rolled_back_at = datetime.utcnow().isoformat() + "Z"
-        await self.store.upsert_refinement(refinement)
-
+    async def _apply_diff(self, proposal):
+        getter = getattr(self.store, f"get_{proposal.target_type}")
+        entity = await getter(proposal.target_id)
+        cls = Lesson if proposal.target_type == "lesson" else Skill
+        entity = entity or cls(id=proposal.target_id)
+        allowed = ({"title", "content", "confidence", "evidence", "tags", "cluster_id", "supersedes_id", "updated_at"}
+                   if proposal.target_type == "lesson" else
+                   {"name", "description", "code", "interface", "dependencies", "test_cases", "lesson_ids", "confidence"})
+        if not proposal.diff.keys() <= allowed:
+            raise ValueError("Proposal changes unsupported fields")
+        for name, change in proposal.diff.items():
+            if not isinstance(change, dict) or "new" not in change:
+                raise ValueError("Each diff must contain a new value")
+            setattr(entity, name, change["new"])
+        entity.version = proposal.target_version
+        entity.updated_at = datetime.utcnow().isoformat() + "Z"
+        if proposal.target_type == "lesson":
+            entity.status = {RefinementAction.DEPRECATE: LessonStatus.DEPRECATED,
+                             RefinementAction.SUPERSEDE: LessonStatus.SUPERSEDED}.get(
+                                 proposal.action, LessonStatus.ACCEPTED)
+        else:
+            if proposal.action == RefinementAction.SUPERSEDE:
+                raise ValueError("Skills do not support SUPERSEDE")
+            # Code has not run in a sandbox: never claim TESTED/PRODUCTION.
+            entity.status = SkillStatus.DEPRECATED if proposal.action == RefinementAction.DEPRECATE else SkillStatus.DRAFT
+        entity.__post_init__()
+        await getattr(self.store, f"upsert_{proposal.target_type}")(entity)
         return True
+
+    async def _create_pre_refinement_snapshot(self, target_id, target_type):
+        state = {"lessons": [], "skills": [], "memories": []}
+        entity = await getattr(self.store, f"get_{target_type}")(target_id)
+        if entity:
+            state[f"{target_type}s"].append(entity.to_dict())
+        return Snapshot(label=f"pre-refine-{target_type}-{target_id}", state=state, trigger="pre-refine")
+
+    async def rollback(self, refinement_id):
+        """Restore only an unchanged target; older rollbacks may not overwrite later changes."""
+        async with self.store.transaction():
+            refinement = await self.store.get_refinement(refinement_id)
+            if not refinement or not refinement.snapshot_id:
+                return False
+            if refinement.status == RefinementStatus.ROLLED_BACK:
+                return True
+            if refinement.status != RefinementStatus.APPLIED:
+                return False
+            snapshot = await self.store.get_snapshot(refinement.snapshot_id)
+            if not snapshot:
+                raise ValueError("Recovery snapshot is missing")
+            getter = getattr(self.store, f"get_{refinement.target_type}")
+            current = await getter(refinement.target_id)
+            expected = refinement.diff.get("__after__")
+            if not expected:
+                raise ValueError("Legacy refinement lacks a post-change state; restore manually from its snapshot")
+            if not current or current.to_dict() != expected:
+                raise ValueError("Target changed after this refinement; revert newer changes first")
+            if refinement.action == RefinementAction.CREATE:
+                await getattr(self.store, f"delete_{refinement.target_type}")(refinement.target_id)
+            else:
+                key = f"{refinement.target_type}s"
+                old = snapshot.state.get(key, [])
+                if len(old) != 1 or old[0]["id"] != refinement.target_id:
+                    raise ValueError("Invalid target snapshot")
+                cls = Lesson if refinement.target_type == "lesson" else Skill
+                await getattr(self.store, f"upsert_{refinement.target_type}")(cls.from_dict(old[0]))
+            refinement.status = RefinementStatus.ROLLED_BACK
+            refinement.rolled_back_at = datetime.utcnow().isoformat() + "Z"
+            await self.store.upsert_refinement(refinement)
+            return True

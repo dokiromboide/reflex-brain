@@ -66,3 +66,43 @@ config.local.yaml
 
 # Node
 node_modules/
+
+# Runtime data: never publish collected content, memories or local state
+scheduler_state/
+scheduler/
+data/
+memories/
+snapshots/
+exports/
+research_output/
+logs/
+work/
+outputs/
+*.jsonl
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.npz
+*.npy
+*_nodes_map.json
+*.lock
+*.tmp
+
+# Downloaded models and local caches
+models/
+hf-cache/
+.cache/
+.ruff_cache/
+*.safetensors
+*.onnx
+*.pt
+*.pth
+
+# Local credentials and verification artifacts
+.env.*
+*.pem
+*.key
+.coverage.*
+coverage.json
+coverage.xml

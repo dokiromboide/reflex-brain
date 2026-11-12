@@ -5,7 +5,7 @@ Quality-filtered semantic search over conversation nodes + knowledge nodes.
 from __future__ import annotations
 
 import os
-import pickle
+import json
 from pathlib import Path
 from typing import Any
 
@@ -141,16 +141,18 @@ class FAISSManager:
     def _load(self):
         if self.index_path.exists():
             self.index = get_faiss().read_index(str(self.index_path))
-            with open(self.map_path, "rb") as f:
-                self.id_map = pickle.load(f)
+            with open(self.map_path, "r", encoding="utf-8") as f:
+                self.id_map = json.load(f)
+            if not isinstance(self.id_map, list) or not all(isinstance(v, str) for v in self.id_map) or len(self.id_map) != self.index.ntotal:
+                raise ValueError("Invalid GraphRAG map; rebuild from trusted source nodes")
         else:
             self.index = get_faiss().IndexFlatIP(EMBED_DIM)
             self.id_map = []
 
     def save(self):
         get_faiss().write_index(self.index, str(self.index_path))
-        with open(self.map_path, "wb") as f:
-            pickle.dump(self.id_map, f)
+        with open(self.map_path, "w", encoding="utf-8") as f:
+            json.dump(self.id_map, f)
 
     def add(self, node_id: str, embedding: np.ndarray):
         faiss_id = self.index.ntotal

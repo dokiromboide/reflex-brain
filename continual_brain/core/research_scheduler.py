@@ -7,8 +7,11 @@ import asyncio
 import json
 import os
 import uuid
+import logging
+import tempfile
+from filelock import FileLock, Timeout
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Callable
 from enum import Enum
 from pathlib import Path
@@ -19,6 +22,15 @@ from continual_brain.core.web_researcher import WebResearcher, research_topic
 from continual_brain.query.hybrid_querier import HybridQuerier
 from continual_brain.query.continual_querier import ContinualQuerier, ContinualFAISSManager
 
+
+logger = logging.getLogger(__name__)
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+def parse_time(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 class ScheduleFrequency(str, Enum):
     HOURLY = "hourly"
@@ -50,14 +62,20 @@ class ResearchTask:
     last_run: Optional[str] = None
     next_run: Optional[str] = None
     run_count: int = 0
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
-    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: utcnow().isoformat())
+    updated_at: str = field(default_factory=lambda: utcnow().isoformat())
     config: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Convert frequency string to enum if needed."""
         if isinstance(self.frequency, str):
             self.frequency = ScheduleFrequency(self.frequency)
+        if not 1 <= self.max_sources <= 50:
+            raise ValueError("max_sources must be between 1 and 50")
+        if self.frequency == ScheduleFrequency.CUSTOM:
+            from croniter import croniter
+            if not self.cron_expression or not croniter.is_valid(self.cron_expression):
+                raise ValueError("Custom frequency requires a valid cron_expression")
 
 
 @dataclass
@@ -73,7 +91,7 @@ class ResearchTrigger:
     enabled: bool = True
     last_triggered: Optional[str] = None
     trigger_count: int = 0
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    created_at: str = field(default_factory=lambda: utcnow().isoformat())
 
     def __post_init__(self):
         """Convert trigger_type string to enum if needed."""
@@ -90,7 +108,7 @@ class ResearchJob:
     topic: str = ""
     trigger_type: TriggerType = TriggerType.MANUAL
     status: str = "pending"  # pending, running, completed, failed
-    started_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    started_at: str = field(default_factory=lambda: utcnow().isoformat())
     completed_at: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -125,51 +143,65 @@ class ResearchScheduler:
         self.running = False
         self.scheduler_task: Optional[asyncio.Task] = None
         
+        self._workers = set()
+        self._state_lock = FileLock(str(self.state_dir / "state.lock"), timeout=5)
+        self._runner_lock = FileLock(str(self.state_dir / "runner.lock"))
+        self._baseline = {"tasks": {}, "triggers": {}, "jobs": {}}
         # Load persisted state
         self._load_state()
     
+    def _read_state(self):
+        path = self.state_dir / "state.json"
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        state = {}
+        for kind in ("tasks", "triggers", "jobs"):
+            old = self.state_dir / f"{kind}.json"
+            state[kind] = json.loads(old.read_text(encoding="utf-8")) if old.exists() else []
+        return state
+
     def _load_state(self):
-        """Load persisted tasks, triggers, and jobs."""
-        # Tasks
-        tasks_file = self.state_dir / "tasks.json"
-        if tasks_file.exists():
-            with open(tasks_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                for t in data:
-                    task = ResearchTask(**t)
-                    self.tasks[task.id] = task
-        
-        # Triggers
-        triggers_file = self.state_dir / "triggers.json"
-        if triggers_file.exists():
-            with open(triggers_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                for t in data:
-                    trigger = ResearchTrigger(**t)
-                    self.triggers[trigger.id] = trigger
-        
-        # Jobs
-        jobs_file = self.state_dir / "jobs.json"
-        if jobs_file.exists():
-            with open(jobs_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                self.jobs = [ResearchJob(**j) for j in data]
-    
+        with self._state_lock:
+            state = self._read_state()
+        self.tasks = {v["id"]: ResearchTask(**v) for v in state["tasks"]}
+        self.triggers = {v["id"]: ResearchTrigger(**v) for v in state["triggers"]}
+        self.jobs = [ResearchJob(**v) for v in state["jobs"]]
+        self._baseline = {kind: {v["id"]: v for v in state[kind]} for kind in state}
+
     def _save_state(self):
-        """Persist state to disk."""
-        # Tasks
-        with open(self.state_dir / "tasks.json", 'w', encoding='utf-8') as f:
-            json.dump([t.__dict__ for t in self.tasks.values()], f, ensure_ascii=False, indent=2)
-        
-        # Triggers
-        with open(self.state_dir / "triggers.json", 'w', encoding='utf-8') as f:
-            json.dump([t.__dict__ for t in self.triggers.values()], f, ensure_ascii=False, indent=2)
-        
-        # Jobs (keep last 1000)
-        jobs_to_save = self.jobs[-1000:]
-        with open(self.state_dir / "jobs.json", 'w', encoding='utf-8') as f:
-            json.dump([j.__dict__ for j in jobs_to_save], f, ensure_ascii=False, indent=2)
-    
+        # Merge only changed records while holding a cross-process lock. A second
+        # MCP client can edit schedules without overwriting the runner's jobs.
+        current = {"tasks": [t.__dict__.copy() for t in self.tasks.values()],
+                   "triggers": [t.__dict__.copy() for t in self.triggers.values()],
+                   "jobs": [t.__dict__.copy() for t in self.jobs]}
+        with self._state_lock:
+            disk = self._read_state()
+            for kind, values in current.items():
+                merged = {v["id"]: v for v in disk[kind]}
+                local = {v["id"]: v for v in values}
+                previous = self._baseline[kind]
+                for key in previous.keys() - local.keys():
+                    if merged.get(key) == previous[key]:
+                        merged.pop(key, None)
+                for key, value in local.items():
+                    if value != previous.get(key):
+                        if key in previous and merged.get(key) not in (previous[key], value):
+                            raise ValueError("Scheduler record changed in another process; retry")
+                        merged[key] = value
+                disk[kind] = list(merged.values())
+            disk["jobs"] = disk["jobs"][-1000:]
+            fd, filename = tempfile.mkstemp(dir=self.state_dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(disk, handle, ensure_ascii=False, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(filename, self.state_dir / "state.json")
+            finally:
+                if os.path.exists(filename):
+                    os.unlink(filename)
+            self._baseline = {kind: {v["id"]: v for v in values} for kind, values in current.items()}
+
     # ============ Task Management ============
     
     def add_task(self, task: ResearchTask) -> ResearchTask:
@@ -205,7 +237,8 @@ class ResearchScheduler:
         for key, value in kwargs.items():
             if hasattr(task, key):
                 setattr(task, key, value)
-        task.updated_at = datetime.utcnow().isoformat() + "Z"
+        task.__post_init__()
+        task.updated_at = utcnow().isoformat()
         if "frequency" in kwargs or "cron_expression" in kwargs:
             task.next_run = self._calculate_next_run(task)
         self._save_state()
@@ -280,14 +313,14 @@ class ResearchScheduler:
         """Check all triggers and create jobs for triggered ones."""
         triggered_jobs = []
         
-        for trigger in self.triggers.values():
+        for trigger in list(self.triggers.values()):
             if not trigger.enabled:
                 continue
             
             # Check cooldown
             if trigger.last_triggered:
-                last = datetime.fromisoformat(trigger.last_triggered.replace('Z', '+00:00'))
-                if datetime.utcnow() - last < timedelta(hours=trigger.cooldown_hours):
+                last = parse_time(trigger.last_triggered)
+                if utcnow() - last < timedelta(hours=trigger.cooldown_hours):
                     continue
             
             # Check topic pattern
@@ -311,7 +344,7 @@ class ResearchScheduler:
                     triggered_jobs.append(job)
                     
                     # Update trigger
-                    trigger.last_triggered = datetime.utcnow().isoformat() + "Z"
+                    trigger.last_triggered = utcnow().isoformat()
                     trigger.trigger_count += 1
         
         if triggered_jobs:
@@ -338,6 +371,18 @@ class ResearchScheduler:
         if self.running:
             return
         
+        try:
+            self._runner_lock.acquire(timeout=0)
+        except Timeout:
+            logger.info("Another MCP process owns the research scheduler")
+            return
+        self._load_state()
+        for job in self.jobs:
+            if job.status == "running":
+                job.status = "failed"
+                job.error = "Previous process interrupted; manual retry required"
+                job.completed_at = utcnow().isoformat()
+        self._save_state()
         self.running = True
         self.scheduler_task = asyncio.create_task(self._scheduler_loop())
     
@@ -351,33 +396,42 @@ class ResearchScheduler:
             except asyncio.CancelledError:
                 pass
     
+        for worker in self._workers:
+            worker.cancel()
+        if self._workers:
+            await asyncio.gather(*self._workers, return_exceptions=True)
+        if self._runner_lock.is_locked:
+            self._runner_lock.release()
+
     async def _scheduler_loop(self):
         """Main scheduler loop."""
         while self.running:
             try:
+                if not self._workers:
+                    self._load_state()
                 await self._process_due_tasks()
                 await self.check_triggers()
                 await self._process_pending_jobs()
             except Exception as e:
-                print(f"Scheduler error: {e}")
+                logger.exception("Scheduler error")
             
             await asyncio.sleep(self.check_interval)
     
     async def _process_due_tasks(self):
         """Execute tasks that are due."""
-        now = datetime.utcnow()
+        now = utcnow()
         
-        for task in self.tasks.values():
+        for task in list(self.tasks.values()):
             if not task.enabled or not task.next_run:
                 continue
             
-            next_run = datetime.fromisoformat(task.next_run.replace('Z', '+00:00'))
+            next_run = parse_time(task.next_run)
             if now >= next_run:
                 # Execute task
                 await self._execute_task(task)
                 
                 # Update next run
-                task.last_run = datetime.utcnow().isoformat() + "Z"
+                task.last_run = utcnow().isoformat()
                 task.run_count += 1
                 task.next_run = self._calculate_next_run(task)
                 self._save_state()
@@ -393,20 +447,26 @@ class ResearchScheduler:
         self.jobs.append(job)
         
         try:
-            result = await research_topic(
-                store=self.store,
+            result = await self.web_researcher.research_topic(
                 topic=task.topic,
                 max_sources=task.max_sources,
                 create_lessons=task.create_lessons,
                 create_memories=task.create_memories
             )
             
+            if result.get("error"):
+                raise ValueError(result["error"])
             job.status = "completed"
-            job.completed_at = datetime.utcnow().isoformat() + "Z"
+            job.completed_at = utcnow().isoformat()
             job.result = result
+        except asyncio.CancelledError:
+            job.status = "failed"
+            job.error = "Research interrupted by shutdown"
+            job.completed_at = utcnow().isoformat()
+            raise
         except Exception as e:
             job.status = "failed"
-            job.completed_at = datetime.utcnow().isoformat() + "Z"
+            job.completed_at = utcnow().isoformat()
             job.error = str(e)
         finally:
             self._save_state()
@@ -420,37 +480,46 @@ class ResearchScheduler:
         pending_jobs = [j for j in self.jobs if j.status == "pending"]
         for job in pending_jobs[:3 - len(running_jobs)]:
             job.status = "running"
-            asyncio.create_task(self._execute_job(job))
+            worker = asyncio.create_task(self._execute_job(job))
+            self._workers.add(worker)
+            worker.add_done_callback(self._workers.discard)
+        self._save_state()
     
     async def _execute_job(self, job: ResearchJob):
         """Execute a research job (manual or triggered)."""
         try:
-            result = await research_topic(
-                store=self.store,
+            result = await self.web_researcher.research_topic(
                 topic=job.topic,
                 max_sources=10,
                 create_lessons=True,
                 create_memories=True
             )
             
+            if result.get("error"):
+                raise ValueError(result["error"])
             job.status = "completed"
-            job.completed_at = datetime.utcnow().isoformat() + "Z"
+            job.completed_at = utcnow().isoformat()
             job.result = result
+        except asyncio.CancelledError:
+            job.status = "failed"
+            job.error = "Research interrupted by shutdown"
+            job.completed_at = utcnow().isoformat()
+            raise
         except Exception as e:
             job.status = "failed"
-            job.completed_at = datetime.utcnow().isoformat() + "Z"
+            job.completed_at = utcnow().isoformat()
             job.error = str(e)
         finally:
             self._save_state()
     
     def _calculate_next_run(self, task: ResearchTask) -> Optional[str]:
         """Calculate next run time based on frequency."""
-        now = datetime.utcnow()
+        now = utcnow()
         
         if task.frequency == ScheduleFrequency.HOURLY:
             next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         elif task.frequency == ScheduleFrequency.DAILY:
-            next_run = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            next_run = now.replace(hour=2, minute=0, second=0, microsecond=0)
         elif task.frequency == ScheduleFrequency.WEEKLY:
             days_ahead = 6 - now.weekday()  # Next Sunday
             next_run = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=days_ahead)
@@ -459,23 +528,17 @@ class ResearchScheduler:
                 next_run = now.replace(year=now.year + 1, month=1, day=1, hour=2, minute=0, second=0, microsecond=0)
             else:
                 next_run = now.replace(month=now.month + 1, day=1, hour=2, minute=0, second=0, microsecond=0)
-        elif task.frequency == ScheduleFrequency.CUSTOM and task.cron_expression:
-            # Use croniter for custom cron expressions
-            try:
-                from croniter import croniter
-                cron = croniter(task.cron_expression, now)
-                next_run = cron.get_next(datetime)
-            except Exception as e:
-                print(f"Invalid cron expression: {task.cron_expression}, error: {e}")
-                next_run = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=1)
         elif task.frequency == ScheduleFrequency.CUSTOM:
-            # Custom frequency without cron expression - fall back to daily
-            next_run = now.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            from croniter import croniter
+            if not task.cron_expression or not croniter.is_valid(task.cron_expression):
+                raise ValueError("Custom frequency requires a valid cron_expression")
+            next_run = croniter(task.cron_expression, now).get_next(datetime)
         else:
-            return None
-        
-        return next_run.isoformat() + "Z"
-    
+            raise ValueError("Unsupported frequency")
+        if next_run <= now:
+            next_run += timedelta(days=7 if task.frequency == ScheduleFrequency.WEEKLY else 1)
+        return next_run.isoformat()
+
     # ============ Manual Research ============
     
     async def research_now(self, topic: str, max_sources: int = 10) -> Dict[str, Any]:
@@ -561,6 +624,8 @@ def create_default_triggers(scheduler: ResearchScheduler) -> List[ResearchTrigge
     ]
     
     for trigger in defaults:
-        scheduler.add_trigger(trigger)
+        trigger.id = "default_" + trigger.name.lower().replace(" ", "_")
+        if trigger.id not in scheduler.triggers:
+            scheduler.add_trigger(trigger)
     
     return defaults

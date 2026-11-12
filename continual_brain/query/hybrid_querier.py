@@ -4,6 +4,7 @@ Unified query interface with source_type filtering.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,7 @@ class HybridQuerier:
         source_types: list[str] | None = None,  # ["conversation", "knowledge", "lesson", "skill", "memory"]
         expand_depth: int = 1,
         min_confidence: float = 0.0,
+        include_untrusted: bool = False,
     ) -> list[HybridQueryResult]:
         """
         Execute hybrid query across all memory sources.
@@ -94,6 +96,8 @@ class HybridQuerier:
                 if r["entity_type"] == "conversation_node" and not query_conversations:
                     continue
                 if r["entity_type"] != "conversation_node" and not query_knowledge:
+                    continue
+                if r["confidence"] < min_confidence:
                     continue
                 all_results.append(HybridQueryResult(
                     source_type="conversation" if r["entity_type"] == "conversation_node" else "knowledge",
@@ -120,6 +124,7 @@ class HybridQuerier:
                 top_k=top_k * 2,
                 source_types=continual_source_types,
                 min_confidence=min_confidence,
+                include_untrusted=include_untrusted,
             )
             for r in continual_results:
                 all_results.append(HybridQueryResult(
@@ -130,9 +135,11 @@ class HybridQuerier:
                     score=r["combined_score"],
                     confidence=r["confidence"],
                     metadata={
+                        "id": r["entity"].id,
                         "status": getattr(r["entity"], "status", None).value if hasattr(r["entity"], "status") else None,
                         "cluster_id": getattr(r["entity"], "cluster_id", None),
                         "tags": getattr(r["entity"], "tags", []),
+                        "trust_level": getattr(r["entity"], "context", {}).get("trust_level", "explicit_or_approved"),
                     },
                 ))
 
@@ -151,8 +158,10 @@ class HybridQuerier:
             node_path,
         )
 
+        if self.brain_faiss.index.ntotal == 0:
+            return []
         embedder = get_embedder()
-        query_emb = embedder.encode(query_text)
+        query_emb = await asyncio.to_thread(lambda: embedder.encode(query_text))
         candidates = self.brain_faiss.search(query_emb, top_k * 3)
 
         results = []
@@ -177,8 +186,10 @@ class HybridQuerier:
                 "content": content,
                 "title": title,
                 "combined_score": combined,
-                "confidence": max(0, combined),  # proxy
+                "confidence": max(0.0, min(1.0, data.get("confidence", 0.5))),
                 "metadata": {
+                    "related_nodes": self.brain_querier._get_neighbors(node_id, expand_depth) if expand_depth else [],
+                    "node_id": node_id,
                     "semantic_label": data.get("semantic_label"),
                     "community": data.get("community"),
                     "cluster_id": data.get("cluster_id"),

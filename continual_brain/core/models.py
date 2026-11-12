@@ -5,6 +5,7 @@ SQLAlchemy models with dataclasses for type safety.
 from __future__ import annotations
 
 import uuid
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -61,6 +62,13 @@ class Lesson:
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
+    def __post_init__(self):
+        self.status = LessonStatus(self.status)
+        if not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1:
+            raise ValueError("confidence must be between 0 and 1")
+        if not isinstance(self.version, int) or isinstance(self.version, bool) or self.version < 1:
+            raise ValueError("version must be a positive integer")
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -113,6 +121,13 @@ class Skill:
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
 
+    def __post_init__(self):
+        self.status = SkillStatus(self.status)
+        if not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1:
+            raise ValueError("confidence must be between 0 and 1")
+        if not isinstance(self.version, int) or isinstance(self.version, bool) or self.version < 1:
+            raise ValueError("version must be a positive integer")
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -163,6 +178,13 @@ class Memory:
     cluster_id: str | None = None
     tags: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+
+    def __post_init__(self):
+        self.type = MemoryType(self.type)
+        if not math.isfinite(self.importance) or not 0 <= self.importance <= 1:
+            raise ValueError("importance must be between 0 and 1")
+        if not math.isfinite(self.decay_rate) or self.decay_rate < 0:
+            raise ValueError("decay_rate must be non-negative")
 
     def to_dict(self) -> dict:
         return {

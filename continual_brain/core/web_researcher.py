@@ -7,10 +7,11 @@ import asyncio
 import json
 import hashlib
 import uuid
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, List, Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, parse_qs
 
 import httpx
 from bs4 import BeautifulSoup
@@ -19,6 +20,46 @@ from continual_brain.core.models import Lesson, Skill, Memory, LessonStatus, Ski
 from continual_brain.core.store import SQLiteStore
 from continual_brain.core.evidence import EntityExtractor, PatternMatcher
 
+
+logger = logging.getLogger(__name__)
+
+async def validate_public_url(url):
+    import ipaddress
+    import socket
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Only public HTTP(S) URLs without credentials are allowed")
+    if parsed.port not in (None, 80, 443):
+        raise ValueError("Nonstandard HTTP ports are not allowed")
+    addresses = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
+        raise ValueError("Private, local and reserved network destinations are not allowed")
+    return sorted({item[4][0] for item in addresses}, key=lambda address: ipaddress.ip_address(address).version)[0]
+
+async def fetch_public_text(client, url, max_bytes=2_000_000):
+    for _ in range(6):
+        address = await validate_public_url(url)
+        origin = httpx.URL(url)
+        # Connect to the validated IP; preserve Host and TLS identity. This avoids
+        # a second DNS lookup changing a public destination into a private one.
+        async with client.stream("GET", origin.copy_with(host=address), follow_redirects=False,
+                                 extensions={"sni_hostname": origin.host},
+                                 headers={"Host": origin.netloc.decode("ascii"),
+                                          "User-Agent": "ReflexBrain/0.2 (+https://github.com/dokiromboide/reflex-brain)"}) as response:
+            if response.is_redirect:
+                url = urljoin(url, response.headers["location"])
+                continue
+            response.raise_for_status()
+            if not any(kind in response.headers.get("content-type", "") for kind in ("text/html", "text/plain")):
+                raise ValueError("Unsupported content type")
+            chunks, size = [], 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError("Response exceeds download limit")
+                chunks.append(chunk)
+            return b"".join(chunks).decode(response.encoding or "utf-8", errors="replace"), url
+    raise ValueError("Too many redirects")
 
 @dataclass
 class SearchResult:
@@ -60,7 +101,7 @@ class WebSearcher:
     
     def __init__(self, provider: str = "duckduckgo"):
         self.provider = provider
-        self.client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+        self.client = httpx.AsyncClient(timeout=20.0, follow_redirects=False, trust_env=False)
     
     async def search(self, query: str, max_results: int = 10) -> List[SearchResult]:
         """Search web and return results."""
@@ -76,24 +117,22 @@ class WebSearcher:
         try:
             from urllib.parse import quote
             url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
-            headers = {"User-Agent": "Mozilla/5.0 (compatible; ReflexBrain/1.0)"}
-            resp = await self.client.get(url, headers=headers)
-            resp.raise_for_status()
-            
-            soup = BeautifulSoup(resp.text, "html.parser")
+            html, _ = await fetch_public_text(self.client, url)
+            soup = BeautifulSoup(html, "html.parser")
             results = []
             
             for result in soup.select(".result")[:max_results]:
                 title_elem = result.select_one(".result__title")
                 snippet_elem = result.select_one(".result__snippet")
-                url_elem = result.select_one(".result__url")
+                url_elem = result.select_one("a.result__a")
                 
                 if title_elem:
                     title = title_elem.get_text(strip=True)
                     snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
-                    url = url_elem.get_text(strip=True) if url_elem else ""
-                    if url and not url.startswith("http"):
-                        url = "https://" + url
+                    url = urljoin("https://html.duckduckgo.com", url_elem.get("href", "")) if url_elem else ""
+                    url = parse_qs(urlparse(url).query).get("uddg", [url])[0]
+                    if not url:
+                        continue
                     
                     results.append(SearchResult(
                         url=url,
@@ -104,7 +143,7 @@ class WebSearcher:
             
             return results
         except Exception as e:
-            print(f"DuckDuckGo search error: {e}")
+            logger.warning("DuckDuckGo search failed: %s", e)
             return []
     
     async def _search_bing(self, query: str, max_results: int) -> List[SearchResult]:
@@ -122,21 +161,12 @@ class ContentExtractor:
     def __init__(self):
         self.entity_extractor = EntityExtractor()
         self.pattern_matcher = PatternMatcher()
-        self.client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+        self.client = httpx.AsyncClient(timeout=20.0, follow_redirects=False, trust_env=False)
     
     async def extract(self, url: str) -> Optional[ExtractedContent]:
         """Extract content from URL."""
         try:
-            headers = {"User-Agent": "Mozilla/5.0 (compatible; ReflexBrain/1.0)"}
-            resp = await self.client.get(url, headers=headers, timeout=20.0)
-            resp.raise_for_status()
-            
-            # Check content type
-            content_type = resp.headers.get("content-type", "")
-            if "text/html" not in content_type and "text/plain" not in content_type:
-                return None
-            
-            html = resp.text
+            html, url = await fetch_public_text(self.client, url)
             soup = BeautifulSoup(html, "html.parser")
             
             # Remove script/style/nav/footer
@@ -203,7 +233,7 @@ class ContentExtractor:
             )
             
         except Exception as e:
-            print(f"Extraction error for {url}: {e}")
+            logger.warning("Extraction failed for %s: %s", url, e)
             return None
     
     async def close(self):
@@ -366,33 +396,42 @@ class WebResearcher:
         Full research pipeline: search → extract → synthesize → store.
         Returns summary of created knowledge.
         """
-        print(f"🔍 Researching: {topic}")
+        logger.info("Researching: %s", topic)
         
         # 1. Search
         search_results = await self.searcher.search(topic, max_sources)
-        print(f"  Found {len(search_results)} sources")
+        logger.info("Found %s sources", len(search_results))
         
         if not search_results:
             return {"topic": topic, "lessons_created": 0, "memories_created": 0, "error": "No search results"}
         
         # 2. Extract content (concurrent)
         extracted = await self._extract_concurrent(search_results[:max_sources])
-        valid_extracted = [e for e in extracted if e is not None]
-        print(f"  Extracted {len(valid_extracted)} valid pages")
+        valid_extracted = list({e.content_hash: e for e in extracted if isinstance(e, ExtractedContent)}.values())
+        logger.info("Extracted %s valid pages", len(valid_extracted))
         
         if not valid_extracted:
             return {"topic": topic, "lessons_created": 0, "memories_created": 0, "error": "No valid content extracted"}
         
         # 3. Synthesize knowledge
         lessons_created = 0
+        proposal_ids = []
         memories_created = 0
         
         if create_lessons:
             lesson_proposals = self.synthesizer.synthesize_lessons(valid_extracted, topic)
             for proposal in lesson_proposals:
+                from continual_brain.core.refinement import RefinementProposal
+                from continual_brain.core.models import RefinementAction
                 lesson = self._create_lesson(proposal)
-                await self.store.upsert_lesson(lesson)
-                lessons_created += 1
+                fields = ("title", "content", "evidence", "confidence", "cluster_id", "tags")
+                refinement = RefinementProposal(
+                    action=RefinementAction.CREATE, target_type="lesson", target_id=lesson.id,
+                    target_version=1, diff={key: {"old": None, "new": getattr(lesson, key)} for key in fields},
+                    justification="Untrusted web research; review source URLs before approval",
+                    evidence=proposal.evidence, evidence_weight=0.0, confidence_delta=lesson.confidence)
+                await self.store.save_proposal(refinement.id, refinement.to_dict())
+                proposal_ids.append(refinement.id)
         
         if create_memories:
             memory_proposals = self.synthesizer.synthesize_memories(valid_extracted, topic)
@@ -401,14 +440,16 @@ class WebResearcher:
                 await self.store.upsert_memory(memory)
                 memories_created += 1
         
-        # Rebuild FAISS index after new knowledge
-        await self._rebuild_index()
+        # The query layer observes SQLite revisions and refreshes automatically.
         
         return {
             "topic": topic,
             "sources_found": len(search_results),
             "sources_extracted": len(valid_extracted),
             "lessons_created": lessons_created,
+            "lessons_proposed": len(proposal_ids),
+            "proposal_ids": proposal_ids,
+            "trust_level": "untrusted",
             "memories_created": memories_created,
             "source_urls": [r.url for r in search_results[:max_sources]]
         }
@@ -433,7 +474,7 @@ class WebResearcher:
             content=proposal.content,
             evidence=proposal.evidence,
             confidence=proposal.confidence,
-            status=LessonStatus.ACCEPTED,
+            status=LessonStatus.PROPOSED,
             cluster_id=proposal.cluster_id,
             tags=proposal.tags
         )
@@ -447,6 +488,7 @@ class WebResearcher:
             content=proposal.content,
             context={
                 "source": "web_research",
+                "trust_level": "untrusted",
                 "topic": proposal.title,
                 "source_urls": proposal.source_urls
             },
